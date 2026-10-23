@@ -206,3 +206,23 @@ impl ProcessRunner {
         }
     }
 }
+
+extern "C" fn request_cancellation(_: libc::c_int) {
+    CANCELLED.store(true, Ordering::Relaxed);
+}
+
+pub fn install_signal_handlers() -> io::Result<()> {
+    // AtomicBool uses lock-free operations on supported macOS/Linux targets.
+    for signal in [libc::SIGINT, libc::SIGTERM] {
+        if unsafe {
+            libc::signal(
+                signal,
+                request_cancellation as *const () as libc::sighandler_t,
+            )
+        } == libc::SIG_ERR
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}

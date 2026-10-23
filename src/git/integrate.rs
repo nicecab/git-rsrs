@@ -40,7 +40,8 @@ impl Git {
                 if String::from_utf8_lossy(&output.stdout).lines().any(|line| {
                     line.starts_with('!')
                         && (line.contains("[rejected] (fetch first)")
-                            || line.contains("[rejected] (non-fast-forward)"))
+                            || line.contains("[rejected] (non-fast-forward)")
+                            || line.contains("[remote rejected] (incorrect old value provided)"))
                 }) =>
             {
                 Ok(PushResult::NonFastForward)
@@ -53,9 +54,14 @@ impl Git {
         if self.text(["rev-list", "--count", &format!("HEAD..{target}")])? == "0" {
             return Ok(Integration::Integrated { changed: false });
         }
+        if self.state()? != super::RepositoryState::Ready {
+            return Ok(Integration::RecoveryRequired { recovery: vec!["Git changed state before integration; refusing to abort or overwrite another operation".into()] });
+        }
+        let original_head = self.head()?;
+        let target_oid = self.text(["rev-parse", &target])?;
         let journal = self.path("git-rsrs-integrate.json")?;
         let before = self.text(["stash", "list", "--format=%H"])?;
-        let metadata = serde_json::json!({"version":1,"head":self.head()?,"target":target,"stash_before":before.lines().collect::<Vec<_>>()});
+        let metadata = serde_json::json!({"version":1,"head":original_head,"target":target,"target_oid":target_oid,"stash_before":before.lines().collect::<Vec<_>>()});
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -74,7 +80,24 @@ impl Git {
         if result.is_err() {
             let active = self.path("rebase-merge")?.exists() || self.path("rebase-apply")?.exists();
             if active {
-                // This operation began only after the caller confirmed Git was idle.
+                let directory = if self.path("rebase-merge")?.exists() {
+                    self.path("rebase-merge")?
+                } else {
+                    self.path("rebase-apply")?
+                };
+                let belongs_to_run = fs::read_to_string(directory.join("orig-head"))
+                    .is_ok_and(|s| s.trim() == original_head)
+                    && fs::read_to_string(directory.join("onto"))
+                        .is_ok_and(|s| s.trim() == target_oid);
+                if !belongs_to_run {
+                    return Ok(Integration::RecoveryRequired {
+                        recovery: vec![format!(
+                            "rebase ownership is ambiguous; inspect {}",
+                            journal.display()
+                        )],
+                    });
+                }
+                // Only abort the matching rebase started by this run.
                 if self
                     .run(["-c", "commit.gpgsign=false", "rebase", "--abort"])
                     .is_err()
@@ -86,7 +109,7 @@ impl Git {
                         )],
                     });
                 }
-                conflicted = true;
+                conflicted = matches!(&result, Err(GitError::Command { .. }));
             }
         }
         let unmerged = match self.run(["ls-files", "--unmerged", "-z"]) {

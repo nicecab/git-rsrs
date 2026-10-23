@@ -21,6 +21,10 @@ enum Commands {
     Sync,
 }
 fn main() {
+    if let Err(error) = git_rsrs::process::install_signal_handlers() {
+        eprintln!("cannot install signal handlers: {error}");
+        std::process::exit(1);
+    }
     let cli = Cli::parse();
     let mut config = match Config::load(&cli.config) {
         Ok(c) => c,

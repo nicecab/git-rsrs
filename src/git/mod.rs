@@ -83,7 +83,11 @@ impl Git {
                     .map(|s| s.to_string_lossy())
                     .collect::<Vec<_>>()
                     .join(" "),
-                message: String::from_utf8_lossy(&output.stderr).into_owned(),
+                message: format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stderr),
+                    String::from_utf8_lossy(&output.stdout)
+                ),
                 output: Box::new(output),
             });
         }
