@@ -172,7 +172,8 @@ per completed run. Diagnostics go to stderr. Reports include the primary outcome
 trigger, created commit, integration/push facts, diagnostics and recovery references.
 A failed active rebase is retained for manual recovery rather than automatically
 aborted: abort can erase concurrent editor changes. Ignored local files are checked
-for collisions before integration; ignored directories are protected as units, so
+for collisions before integration, including paths touched by intermediate replayed
+commits; ignored directories are protected as units, so
 incoming tracked content beneath one also requires manual attention. A retained
 autostash requires intervention even when the index has no unmerged entries.
 

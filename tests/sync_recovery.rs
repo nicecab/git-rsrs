@@ -290,3 +290,26 @@ fn review_retained_autostash_without_unmerged_entries_stops_before_push() {
         "REJECTED BEFORE REBASE"
     );
 }
+
+#[test]
+fn review_ignored_content_is_protected_from_intermediate_replayed_commits() {
+    let f = Fixture::new();
+    let c = config(&f);
+    f.commit(&f.a, "temporary", "committed temporarily");
+    fs::remove_file(f.a.join("temporary")).unwrap();
+    git(&f.a, ["add", "-A"]);
+    git(&f.a, ["commit", "-m", "remove temporary"]);
+    f.commit(&f.b, "remote", "incoming");
+    git(&f.b, ["push"]);
+    fs::write(f.a.join(".git/info/exclude"), "temporary\n").unwrap();
+    fs::write(f.a.join("temporary"), "LOCAL SECRET\n").unwrap();
+    let head = text(&f.a, &["rev-parse", "HEAD"]);
+    let report = sync_once(&c, Trigger::Manual);
+    assert_eq!(report.outcome, Outcome::ManualIntervention, "{report:?}");
+    assert_eq!(
+        fs::read_to_string(f.a.join("temporary")).unwrap(),
+        "LOCAL SECRET\n"
+    );
+    assert_eq!(text(&f.a, &["rev-parse", "HEAD"]), head);
+    assert!(!report.pushed);
+}

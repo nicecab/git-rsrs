@@ -165,10 +165,6 @@ impl Git {
                 .map(|s| PathBuf::from(OsString::from_vec(s.to_vec())))
                 .collect::<Vec<_>>()
         };
-        let incoming = paths(
-            self.run(["ls-tree", "-r", "--name-only", "-z", target])?
-                .stdout,
-        );
         let ignored = paths(
             self.run([
                 "ls-files",
@@ -180,6 +176,33 @@ impl Git {
             ])?
             .stdout,
         );
+        if ignored.is_empty() {
+            return Ok(vec![]);
+        }
+        let mut incoming = paths(
+            self.run(["ls-tree", "-r", "--name-only", "-z", target])?
+                .stdout,
+        );
+        // Rebase can create and later remove a path absent from both final trees.
+        // Protect ignored content against every local commit it may replay.
+        let commits = self.text(["rev-list", &format!("{target}..HEAD")])?;
+        for commit in commits.lines() {
+            incoming.extend(paths(
+                self.run([
+                    "diff-tree",
+                    "--root",
+                    "--no-commit-id",
+                    "--name-only",
+                    "--no-renames",
+                    "-r",
+                    "-z",
+                    commit,
+                ])?
+                .stdout,
+            ));
+        }
+        incoming.sort();
+        incoming.dedup();
         Ok(ignored
             .into_iter()
             .filter(|local| {
