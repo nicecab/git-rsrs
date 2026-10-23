@@ -1,5 +1,9 @@
 use clap::{Parser, Subcommand};
-use git_rsrs::{config::Config, outcome::Trigger, sync::sync_once};
+use git_rsrs::{
+    config::Config,
+    outcome::{Outcome, Trigger},
+    sync::sync_once,
+};
 use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
@@ -54,7 +58,7 @@ fn main() {
                 eprintln!("{error}");
                 std::process::exit(
                     if matches!(error, git_rsrs::watch::WatchError::Interrupted) {
-                        4
+                        Outcome::ManualIntervention.exit_code()
                     } else {
                         1
                     },

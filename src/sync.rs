@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     git::{
-        Git, GitError, RepositoryState,
+        COMMIT_JOURNAL, Git, GitError, INTEGRATE_JOURNAL, RepositoryState,
         integrate::{Integration, PushResult},
         snapshot::{CommitResult, Snapshot},
     },
@@ -61,6 +61,19 @@ impl From<GitError> for Failure {
         }
     }
 }
+impl From<LockError> for Failure {
+    fn from(error: LockError) -> Self {
+        Self {
+            outcome: match error {
+                LockError::Timeout { .. } => Outcome::LockTimeout,
+                LockError::Interrupted => Outcome::ManualIntervention,
+                _ => Outcome::Failed,
+            },
+            message: error.to_string(),
+            recovery: vec![],
+        }
+    }
+}
 fn manual(message: impl Into<String>) -> Failure {
     Failure {
         outcome: Outcome::ManualIntervention,
@@ -101,27 +114,10 @@ fn sync_locked(
     let mut git = Git::open(&config.repo, ProcessRunner)?;
     git.timeout = config.git_timeout;
     *checkout_root = git.root.clone();
-    let _lock =
-        CheckoutLock::acquire(&git, &config.lock_name, config.lock_timeout).map_err(|error| {
-            Failure {
-                outcome: if matches!(error, LockError::Timeout { .. }) {
-                    Outcome::LockTimeout
-                } else if matches!(error, LockError::Interrupted) {
-                    Outcome::ManualIntervention
-                } else {
-                    Outcome::Failed
-                },
-                message: error.to_string(),
-                recovery: vec![],
-            }
-        })?;
-    for marker in [
-        "git-rsrs-commit.json",
-        "git-rsrs-integrate.json",
-        "index.lock",
-    ] {
-        if git.path(marker)?.exists() {
-            let path = git.path(marker)?;
+    let _lock = CheckoutLock::acquire(&git, &config.lock_name, config.lock_timeout)?;
+    for marker in [COMMIT_JOURNAL, INTEGRATE_JOURNAL, "index.lock"] {
+        let path = git.path(marker)?;
+        if path.exists() {
             return Err(Failure {
                 outcome: Outcome::ManualIntervention,
                 message: format!("pending recovery or Git lock: {}", path.display()),
@@ -146,7 +142,7 @@ fn sync_locked(
     let mut expected_head = git.head()?;
     let context = HookContext::new(&git.root, report.trigger);
     let mut rejected = false;
-    if !git.status()?.is_empty() {
+    if git.is_dirty()? {
         if matches!(report.trigger, Trigger::Initial | Trigger::Periodic) {
             report.outcome = Outcome::Deferred;
             return Ok(());
@@ -201,11 +197,8 @@ fn sync_locked(
             }
         }
     }
-    require_identity(&git, config, &expected_head)?;
-    git.fetch(&config.remote, &config.branch)?;
-    require_identity(&git, config, &expected_head)?;
     let mut post_failed = false;
-    integrate(
+    fetch_and_integrate(
         &git,
         config,
         report,
@@ -213,13 +206,9 @@ fn sync_locked(
         &mut post_failed,
         &mut expected_head,
     )?;
-    require_identity(&git, config, &expected_head)?;
     if git.ahead(&config.remote, &config.branch)? {
         if git.push(&config.remote, &config.branch, &expected_head)? == PushResult::NonFastForward {
-            require_identity(&git, config, &expected_head)?;
-            git.fetch(&config.remote, &config.branch)?;
-            require_identity(&git, config, &expected_head)?;
-            integrate(
+            fetch_and_integrate(
                 &git,
                 config,
                 report,
@@ -227,7 +216,6 @@ fn sync_locked(
                 &mut post_failed,
                 &mut expected_head,
             )?;
-            require_identity(&git, config, &expected_head)?;
             if git.push(&config.remote, &config.branch, &expected_head)?
                 == PushResult::NonFastForward
             {
@@ -249,7 +237,7 @@ fn sync_locked(
     };
     Ok(())
 }
-fn integrate(
+fn fetch_and_integrate(
     git: &Git,
     config: &Config,
     report: &mut SyncReport,
@@ -258,16 +246,14 @@ fn integrate(
     expected_head: &mut String,
 ) -> Result<(), Failure> {
     require_identity(git, config, expected_head)?;
+    git.fetch(&config.remote, &config.branch)?;
+    require_identity(git, config, expected_head)?;
     match git.integrate(&config.remote, &config.branch)? {
         Integration::Integrated { changed } => {
-            if git.branch()? != config.branch || git.state()? != RepositoryState::Ready {
-                return Err(manual("checkout changed during integration"));
-            }
             if changed {
                 *expected_head = git.head()?;
-            } else {
-                require_identity(git, config, expected_head)?;
             }
+            require_identity(git, config, expected_head)?;
             report.integrated |= changed;
         }
         Integration::RebaseConflict { recovery }
@@ -287,7 +273,7 @@ fn integrate(
     );
     *post_failed |= !hooks.diagnostics.is_empty();
     report.diagnostics.extend(hooks.diagnostics);
-    Ok(())
+    require_identity(git, config, expected_head)
 }
 
 fn require_identity(git: &Git, config: &Config, expected_head: &str) -> Result<(), Failure> {

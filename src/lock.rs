@@ -5,9 +5,9 @@ use crate::{
 };
 use serde_json::json;
 use std::{
-    fs::{File, OpenOptions},
+    fs::{File, OpenOptions, TryLockError},
     io::{self, Seek, SeekFrom, Write},
-    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     sync::atomic::Ordering,
     thread,
@@ -52,15 +52,11 @@ impl CheckoutLock {
         let mut reported_wait = false;
         loop {
             // flock operates on the live owned descriptor, never on a pid file.
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-                break;
-            }
-            let error = io::Error::last_os_error();
-            if !matches!(
-                error.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-            ) {
-                return Err(error.into());
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(TryLockError::WouldBlock) => {}
+                Err(TryLockError::Error(error)) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(TryLockError::Error(error)) => return Err(error.into()),
             }
             if !reported_wait {
                 eprintln!("waiting for checkout lock: {}", path.display());
@@ -78,11 +74,7 @@ impl CheckoutLock {
         lock.file.seek(SeekFrom::Start(0))?;
         lock.file.set_len(0)?;
         let metadata = json!({"pid":std::process::id().to_string(),"hostname":std::env::var("HOSTNAME").unwrap_or_else(|_|"localhost".into()),"operation":"git-rsrs sync","acquired_at":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs().to_string()});
-        lock.file.write_all(
-            serde_json::to_string(&metadata)
-                .expect("metadata is serializable")
-                .as_bytes(),
-        )?;
+        lock.file.write_all(metadata.to_string().as_bytes())?;
         lock.file.sync_all()?;
         Ok(lock)
     }
@@ -91,8 +83,6 @@ impl Drop for CheckoutLock {
     fn drop(&mut self) {
         let _ = self.file.set_len(0);
         let _ = self.file.sync_all();
-        unsafe {
-            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-        }
+        let _ = self.file.unlock();
     }
 }

@@ -19,7 +19,6 @@ pub struct Scheduler {
     last_change: Option<Instant>,
     generation: u64,
     in_flight: Option<u64>,
-    pending_local: bool,
     pending_periodic: bool,
     initial: bool,
     paused: bool,
@@ -34,7 +33,6 @@ impl Scheduler {
             last_change: dirty.then_some(now),
             generation: u64::from(dirty),
             in_flight: None,
-            pending_local: dirty,
             pending_periodic: true,
             initial: true,
             paused: false,
@@ -46,7 +44,6 @@ impl Scheduler {
             SchedulerEvent::LocalChange => {
                 self.generation = self.generation.wrapping_add(1);
                 self.last_change = Some(now);
-                self.pending_local = true;
             }
             SchedulerEvent::PeriodicTick => {
                 if now.duration_since(self.last_periodic) >= self.interval {
@@ -58,11 +55,9 @@ impl Scheduler {
                 if let Some(generation) = self.in_flight.take()
                     && generation == self.generation
                 {
-                    self.pending_local = false;
                     self.last_change = None;
                 }
                 if outcome == Outcome::Deferred {
-                    self.pending_local = true;
                     self.last_change = Some(now);
                 }
                 if outcome == Outcome::ManualIntervention {
@@ -74,11 +69,10 @@ impl Scheduler {
         if self.shutdown || self.paused || self.in_flight.is_some() {
             return None;
         }
-        let local_ready = self.pending_local
-            && self
-                .last_change
-                .is_some_and(|last| now.duration_since(last) >= self.quiet);
-        if local_ready || (!self.pending_local && self.pending_periodic) {
+        let local_ready = self
+            .last_change
+            .is_some_and(|last| now.duration_since(last) >= self.quiet);
+        if local_ready || (self.last_change.is_none() && self.pending_periodic) {
             let trigger = if local_ready {
                 Trigger::LocalChange
             } else if self.initial {

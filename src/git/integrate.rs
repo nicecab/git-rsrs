@@ -1,8 +1,5 @@
-use super::{Git, GitError};
-use std::{
-    fs::{self, OpenOptions},
-    io::Write,
-};
+use super::{Git, GitError, INTEGRATE_JOURNAL, nul_paths};
+use std::{fs, path::PathBuf};
 
 #[derive(Debug)]
 pub enum Integration {
@@ -78,16 +75,9 @@ impl Git {
         }
         let original_head = self.head()?;
         let target_oid = self.text(["rev-parse", &target])?;
-        let journal = self.path("git-rsrs-integrate.json")?;
         let before = self.text(["stash", "list", "--format=%H"])?;
         let metadata = serde_json::json!({"version":1,"head":original_head,"target":target,"target_oid":target_oid,"stash_before":before.lines().collect::<Vec<_>>()});
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&journal)?;
-        file.write_all(metadata.to_string().as_bytes())?;
-        file.sync_all()?;
-        fs::File::open(&self.git_dir)?.sync_all()?;
+        let journal = self.write_journal(INTEGRATE_JOURNAL, &metadata)?;
         let result = self.run([
             "-c",
             "commit.gpgsign=false",
@@ -156,51 +146,44 @@ impl Git {
 }
 
 impl Git {
-    fn ignored_collisions(&self, target: &str) -> Result<Vec<std::path::PathBuf>, GitError> {
-        use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
-        let paths = |bytes: Vec<u8>| {
-            bytes
-                .split(|b| *b == 0)
-                .filter(|s| !s.is_empty())
-                .map(|s| PathBuf::from(OsString::from_vec(s.to_vec())))
-                .collect::<Vec<_>>()
-        };
-        let ignored = paths(
-            self.run([
-                "ls-files",
-                "--others",
-                "--directory",
-                "--ignored",
-                "--exclude-standard",
-                "-z",
-            ])?
-            .stdout,
-        );
+    fn ignored_collisions(&self, target: &str) -> Result<Vec<PathBuf>, GitError> {
+        let ignored = nul_paths(
+            &self
+                .run([
+                    "ls-files",
+                    "--others",
+                    "--directory",
+                    "--ignored",
+                    "--exclude-standard",
+                    "-z",
+                ])?
+                .stdout,
+        )
+        .collect::<Vec<_>>();
         if ignored.is_empty() {
             return Ok(vec![]);
         }
-        let mut incoming = paths(
-            self.run(["ls-tree", "-r", "--name-only", "-z", target])?
+        let mut incoming = nul_paths(
+            &self
+                .run(["ls-tree", "-r", "--name-only", "-z", target])?
                 .stdout,
-        );
+        )
+        .collect::<Vec<_>>();
         // Rebase can create and later remove a path absent from both final trees.
         // Protect ignored content against every local commit it may replay.
-        let commits = self.text(["rev-list", &format!("{target}..HEAD")])?;
-        for commit in commits.lines() {
-            incoming.extend(paths(
-                self.run([
-                    "diff-tree",
+        incoming.extend(nul_paths(
+            &self
+                .run([
+                    "log",
                     "--root",
-                    "--no-commit-id",
+                    "--format=",
                     "--name-only",
                     "--no-renames",
-                    "-r",
                     "-z",
-                    commit,
+                    &format!("{target}..HEAD"),
                 ])?
                 .stdout,
-            ));
-        }
+        ));
         incoming.sort();
         incoming.dedup();
         Ok(ignored

@@ -5,11 +5,16 @@ use crate::process::{CommandOutput, CommandSpec, ProcessError, ProcessRunner};
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
+    fs::{File, OpenOptions},
+    io::Write,
     os::unix::ffi::OsStringExt,
     path::{Path, PathBuf},
     time::Duration,
 };
 use thiserror::Error;
+
+pub const COMMIT_JOURNAL: &str = "git-rsrs-commit.json";
+pub const INTEGRATE_JOURNAL: &str = "git-rsrs-integrate.json";
 
 #[derive(Debug, Error)]
 pub enum GitError {
@@ -103,7 +108,18 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        String::from_utf8(self.run(args)?.stdout)
+        self.text_env(args, &BTreeMap::new())
+    }
+    pub fn text_env<I, S>(
+        &self,
+        args: I,
+        env: &BTreeMap<OsString, OsString>,
+    ) -> Result<String, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        String::from_utf8(self.run_env(args, env)?.stdout)
             .map(|s| s.trim_end_matches('\n').into())
             .map_err(|_| GitError::Invalid("expected textual Git output".into()))
     }
@@ -120,6 +136,35 @@ impl Git {
                 .stdout,
         )
     }
+    pub fn is_dirty(&self) -> Result<bool, GitError> {
+        Ok(!self
+            .run(["status", "--porcelain=v1", "-z", "--untracked-files=normal"])?
+            .stdout
+            .is_empty())
+    }
+    /// Durably creates a recovery journal, failing if one already exists.
+    pub fn write_journal(
+        &self,
+        name: &str,
+        contents: &serde_json::Value,
+    ) -> Result<PathBuf, GitError> {
+        let path = self.path(name)?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        file.write_all(
+            serde_json::to_string_pretty(contents)
+                .expect("journal metadata")
+                .as_bytes(),
+        )?;
+        file.sync_all()?;
+        self.sync_git_dir()?;
+        Ok(path)
+    }
+    pub fn sync_git_dir(&self) -> Result<(), GitError> {
+        Ok(File::open(&self.git_dir)?.sync_all()?)
+    }
     pub fn head(&self) -> Result<String, GitError> {
         self.text(["rev-parse", "--verify", "HEAD"])
     }
@@ -132,6 +177,12 @@ fn path_output(mut raw: Vec<u8>) -> PathBuf {
         raw.pop();
     }
     PathBuf::from(OsString::from_vec(raw))
+}
+/// Splits NUL-terminated Git path output, skipping empty records.
+pub(crate) fn nul_paths(raw: &[u8]) -> impl Iterator<Item = PathBuf> + '_ {
+    raw.split(|b| *b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| PathBuf::from(OsString::from_vec(s.to_vec())))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

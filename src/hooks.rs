@@ -1,5 +1,6 @@
 use crate::{
     config::HookConfig,
+    git::snapshot::index_env,
     outcome::{Diagnostic, SyncReport, Trigger},
     process::{CommandSpec, ProcessError, ProcessRunner},
 };
@@ -68,25 +69,19 @@ impl HookRunner {
             spec.env
                 .insert("RSRS_TRIGGER".into(), context.trigger.as_str().into());
             if let Some(index) = &context.index {
-                spec.env
-                    .insert("GIT_INDEX_FILE".into(), index.as_os_str().into());
+                spec.env.extend(index_env(index));
             }
             if let Some(report) = &context.report {
                 spec.env
                     .insert("RSRS_OUTCOME".into(), report.outcome.as_str().into());
                 // Do not export potentially huge hook diagnostics as environment variables.
-                let mut metadata = serde_json::json!({"version":1,"outcome":report.outcome,"trigger":report.trigger,"committed":report.committed,"integrated":report.integrated,"pushed":report.pushed,"recovery":report.recovery});
-                if serde_json::to_vec(&metadata)
-                    .expect("report metadata")
-                    .len()
-                    > 16 * 1024
-                {
-                    metadata = serde_json::json!({"version":1,"outcome":report.outcome,"trigger":report.trigger,"truncated":true});
+                let mut metadata = serde_json::json!({"version":1,"outcome":report.outcome,"trigger":report.trigger,"committed":report.committed,"integrated":report.integrated,"pushed":report.pushed,"recovery":report.recovery}).to_string();
+                if metadata.len() > 16 * 1024 {
+                    metadata = serde_json::json!({"version":1,"outcome":report.outcome,"trigger":report.trigger,"truncated":true}).to_string();
                 }
-                spec.env
-                    .insert("RSRS_REPORT_JSON".into(), metadata.to_string().into());
+                spec.env.insert("RSRS_REPORT_JSON".into(), metadata.into());
             }
-            let (code, message, fault) = match ProcessRunner.run(&spec) {
+            let (code, message) = match ProcessRunner.run(&spec) {
                 Ok(output) => {
                     let message = format!(
                         "exit {:?}, signal {:?}: {}{}{}",
@@ -100,15 +95,15 @@ impl HookRunner {
                             ""
                         }
                     );
-                    (output.code, message, false)
+                    (output.code, message)
                 }
                 Err(error) => {
                     result.timed_out |= matches!(error, ProcessError::Timeout(_));
                     result.interrupted |= matches!(error, ProcessError::Interrupted(_));
-                    (None, error.to_string(), true)
+                    (None, error.to_string())
                 }
             };
-            if code == Some(0) && !fault {
+            if code == Some(0) {
                 continue;
             }
             result.diagnostics.push(Diagnostic {
@@ -116,7 +111,7 @@ impl HookRunner {
                 message,
             });
             if phase == HookPhase::PreCommit {
-                if !fault && code.is_some_and(|c| hook.reject_exit_codes.contains(&c)) {
+                if code.is_some_and(|c| hook.reject_exit_codes.contains(&c)) {
                     result.decision = HookDecision::RejectCommit;
                 } else {
                     result.decision = HookDecision::AbortSync;

@@ -1,4 +1,4 @@
-use super::{Git, GitError};
+use super::{COMMIT_JOURNAL, Git, GitError};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -31,7 +31,7 @@ impl Snapshot {
                 "unmerged index entries require manual resolution".into(),
             ));
         }
-        if git.path("git-rsrs-commit.json")?.exists() {
+        if git.path(COMMIT_JOURNAL)?.exists() {
             return Err(GitError::Invalid(
                 "unfinished commit publication; inspect git-rsrs-commit.json before retrying"
                     .into(),
@@ -51,10 +51,7 @@ impl Snapshot {
             git.run_env(["read-tree", &head], &env)?;
         }
         git.run_env(["add", "-A", "--", "."], &env)?;
-        let tree = String::from_utf8(git.run_env(["write-tree"], &env)?.stdout)
-            .map_err(|_| GitError::Invalid("nontextual tree id".into()))?
-            .trim()
-            .into();
+        let tree = git.text_env(["write-tree"], &env)?;
         Ok(Self {
             directory,
             index,
@@ -64,21 +61,20 @@ impl Snapshot {
             original_index,
         })
     }
+    fn base_unchanged(&self, git: &Git) -> Result<bool, GitError> {
+        Ok(git.head()? == self.head
+            && git.branch()? == self.branch
+            && read_optional(&git.path("index")?)? == self.original_index)
+    }
     pub fn unchanged(&self, git: &Git) -> Result<bool, GitError> {
-        if git.head()? != self.head
-            || git.branch()? != self.branch
-            || read_optional(&git.path("index")?)? != self.original_index
-        {
+        if !self.base_unchanged(git)? {
             return Ok(false);
         }
         let fresh = Self::capture(git)?;
         if fresh.tree != self.tree {
             return Ok(false);
         }
-        let current =
-            String::from_utf8(git.run_env(["write-tree"], &index_env(&self.index))?.stdout)
-                .map_err(|_| GitError::Invalid("nontextual tree id".into()))?;
-        Ok(current.trim() == self.tree)
+        Ok(git.text_env(["write-tree"], &index_env(&self.index))? == self.tree)
     }
     pub fn commit_validated(self, git: &Git) -> Result<CommitResult, GitError> {
         if !self.unchanged(git)? {
@@ -92,10 +88,7 @@ impl Snapshot {
             .write(true)
             .create_new(true)
             .open(&lock_path)?;
-        if git.head()? != self.head
-            || git.branch()? != self.branch
-            || read_optional(&git.path("index")?)? != self.original_index
-        {
+        if !self.base_unchanged(git)? {
             drop(index_lock);
             fs::remove_file(lock_path)?;
             return Ok(CommitResult::DeferredConcurrentChange);
@@ -107,19 +100,8 @@ impl Snapshot {
             fs::write(&backup, bytes)?;
             fs::File::open(&backup)?.sync_all()?;
         }
-        let journal = git.path("git-rsrs-commit.json")?;
         let metadata = serde_json::json!({"version":1,"head":self.head,"branch":self.branch,"tree":self.tree,"candidate_index":self.index,"original_index":backup,"original_index_existed":self.original_index.is_some(),"directory":directory,"index_lock":lock_path});
-        let mut journal_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&journal)?;
-        journal_file.write_all(
-            serde_json::to_string_pretty(&metadata)
-                .expect("journal metadata")
-                .as_bytes(),
-        )?;
-        journal_file.sync_all()?;
-        fs::File::open(&git.git_dir)?.sync_all()?;
+        let journal = git.write_journal(COMMIT_JOURNAL, &metadata)?;
         let result = git.run_env(
             [
                 "-c",
@@ -164,7 +146,7 @@ impl Snapshot {
         index_lock.sync_all()?;
         drop(index_lock);
         fs::rename(&lock_path, git.path("index")?)?;
-        fs::File::open(&git.git_dir)?.sync_all()?;
+        git.sync_git_dir()?;
         fs::remove_file(journal)?;
         fs::remove_dir_all(directory)?;
         Ok(CommitResult::Created(current_head))
