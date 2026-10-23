@@ -207,7 +207,7 @@ fn killed_commit_retains_a_journal_and_original_index_for_manual_recovery() {
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PHASE_TIMEOUT;
     while !ready.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }

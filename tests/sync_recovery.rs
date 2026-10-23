@@ -144,7 +144,7 @@ fn sigterm_during_integration_stops_children_and_retains_recovery_state() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PHASE_TIMEOUT;
     while !ready.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }

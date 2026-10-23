@@ -35,6 +35,28 @@ rsrs never switches branches. Existing merge/rebase/cherry-pick/revert/bisect st
 unborn repositories, detached HEAD, and unmerged index entries require manual intervention. Unresolved
 recovery journals and another Git index lock also prevent automatic mutations.
 
+## Homebrew
+
+The [Nice Cabbage tap](https://github.com/nicecab/homebrew-tap) provides Homebrew
+distribution. After the first stable release and tap update:
+
+```sh
+brew install nicecab/tap/git-rsrs
+```
+
+Before that first release, once the initial implementation is merged into main,
+the tap can build the default branch from source:
+
+```sh
+brew install --HEAD nicecab/tap/git-rsrs
+```
+
+The tap verifies all released platform archives and checksums before updating its
+formula. It checks for stable releases hourly and supports manual refresh, using
+its own repository token rather than a cross-repository personal access token.
+Upstream release publication and tap activation happen only after their PRs land;
+ordinary builds do not publish a version.
+
 ## Configuration
 
 Start with [examples/config.toml](examples/config.toml). Schema version 1 rejects

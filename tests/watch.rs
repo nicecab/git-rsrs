@@ -46,7 +46,7 @@ impl WatchChild {
         Self { child, reports: rx }
     }
     fn committed(&self) -> SyncReport {
-        let deadline = Instant::now() + Duration::from_secs(8);
+        let deadline = Instant::now() + PHASE_TIMEOUT;
         loop {
             let report = self
                 .reports
@@ -91,10 +91,7 @@ fn event_filter_keeps_tracked_ignored_paths_and_excludes_git_and_untracked_ignor
 fn watched_edits_wait_for_quiet_even_when_periodic_ticks_are_frequent() {
     let f = Fixture::new();
     let watcher = WatchChild::start(&f, "500ms", "100ms");
-    watcher
-        .reports
-        .recv_timeout(Duration::from_secs(5))
-        .unwrap();
+    watcher.reports.recv_timeout(PHASE_TIMEOUT).unwrap();
     let head = text(&f.a, &["rev-parse", "HEAD"]);
     fs::write(f.a.join("new"), "first").unwrap();
     thread::sleep(Duration::from_millis(200));
@@ -120,13 +117,10 @@ fn dirty_startup_waits_instead_of_committing_immediately() {
 fn idle_periodic_sync_receives_remote_changes_without_local_events() {
     let f = Fixture::new();
     let watcher = WatchChild::start(&f, "200ms", "200ms");
-    watcher
-        .reports
-        .recv_timeout(Duration::from_secs(5))
-        .unwrap();
+    watcher.reports.recv_timeout(PHASE_TIMEOUT).unwrap();
     f.commit(&f.b, "remote", "incoming");
     git(&f.b, ["push"]);
-    let deadline = Instant::now() + Duration::from_secs(8);
+    let deadline = Instant::now() + PHASE_TIMEOUT;
     while !f.a.join("remote").exists() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(25));
     }
@@ -140,10 +134,7 @@ fn idle_periodic_sync_receives_remote_changes_without_local_events() {
 fn watched_rename_and_delete_are_committed() {
     let f = Fixture::new();
     let watcher = WatchChild::start(&f, "200ms", "200ms");
-    watcher
-        .reports
-        .recv_timeout(Duration::from_secs(5))
-        .unwrap();
+    watcher.reports.recv_timeout(PHASE_TIMEOUT).unwrap();
     fs::rename(f.a.join("shared.txt"), f.a.join("renamed")).unwrap();
     watcher.committed();
     assert_eq!(text(&f.origin, &["show", "main:renamed"]), "initial");

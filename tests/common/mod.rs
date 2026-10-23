@@ -7,6 +7,10 @@ use std::{
     time::Duration,
 };
 
+// Phase readiness can take longer on shared CI hosts. Behavioral timeout and
+// quiet-period assertions keep their own tighter bounds.
+pub const PHASE_TIMEOUT: Duration = Duration::from_secs(30);
+
 pub fn git<I, S>(cwd: &Path, args: I) -> CommandOutput
 where
     I: IntoIterator<Item = S>,
@@ -86,7 +90,7 @@ pub struct Barrier {
 }
 impl Barrier {
     pub fn wait(&self) -> bool {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + PHASE_TIMEOUT;
         while !self.ready.exists() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -105,7 +109,7 @@ pub fn barrier_hook(f: &Fixture, name: &str) -> Barrier {
         release: f.temp.path().join("barrier-release"),
     };
     let code = format!(
-        "#!/usr/bin/env python3\nfrom pathlib import Path\nimport time\nPath({:?}).touch()\ndeadline=time.monotonic()+8\nwhile not Path({:?}).exists():\n if time.monotonic()>deadline: raise SystemExit(1)\n time.sleep(.01)\n",
+        "#!/usr/bin/env python3\nfrom pathlib import Path\nimport time\nPath({:?}).touch()\ndeadline=time.monotonic()+60\nwhile not Path({:?}).exists():\n if time.monotonic()>deadline: raise SystemExit(1)\n time.sleep(.01)\n",
         barrier.ready.to_str().unwrap(),
         barrier.release.to_str().unwrap()
     );

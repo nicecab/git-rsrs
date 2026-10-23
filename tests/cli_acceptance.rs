@@ -116,7 +116,7 @@ fn stopping_active_watch_reports_interruption_and_does_not_leave_hooks_running()
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + PHASE_TIMEOUT;
     while !ready.exists() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
     }
@@ -261,7 +261,7 @@ fn stopping_watch_during_initial_git_inspection_is_graceful() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + PHASE_TIMEOUT;
     while !ready.exists() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(10));
     }

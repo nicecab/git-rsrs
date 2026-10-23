@@ -96,7 +96,7 @@ fn review_branch_switch_during_fetch_cannot_publish_feature_work_to_main() {
         release: f.temp.path().join("release"),
     };
     let upload = f.temp.path().join("upload.py");
-    fs::write(&upload,format!("#!/usr/bin/env python3\nimport os,sys,time,pathlib\npathlib.Path({:?}).touch()\ndeadline=time.monotonic()+8\nwhile not pathlib.Path({:?}).exists():\n if time.monotonic()>deadline: raise SystemExit(1)\n time.sleep(.01)\nos.execvp('git-upload-pack',['git-upload-pack',*sys.argv[1:]])\n",barrier.ready.to_str().unwrap(),barrier.release.to_str().unwrap())).unwrap();
+    fs::write(&upload,format!("#!/usr/bin/env python3\nimport os,sys,time,pathlib\npathlib.Path({:?}).touch()\ndeadline=time.monotonic()+60\nwhile not pathlib.Path({:?}).exists():\n if time.monotonic()>deadline: raise SystemExit(1)\n time.sleep(.01)\nos.execvp('git-upload-pack',['git-upload-pack',*sys.argv[1:]])\n",barrier.ready.to_str().unwrap(),barrier.release.to_str().unwrap())).unwrap();
     fs::set_permissions(&upload, fs::Permissions::from_mode(0o755)).unwrap();
     git(
         &f.a,
