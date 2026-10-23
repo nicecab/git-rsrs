@@ -1,0 +1,124 @@
+use crate::{
+    config::HookConfig,
+    git::snapshot::index_env,
+    outcome::{Diagnostic, SyncReport, Trigger},
+    process::{CommandSpec, ProcessError, ProcessRunner},
+};
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookPhase {
+    PreCommit,
+    PostIntegrate,
+    OnResult,
+}
+impl HookPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PreCommit => "pre_commit",
+            Self::PostIntegrate => "post_integrate",
+            Self::OnResult => "on_result",
+        }
+    }
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookDecision {
+    Allow,
+    RejectCommit,
+    AbortSync,
+}
+#[derive(Debug)]
+pub struct HookReport {
+    pub decision: HookDecision,
+    pub diagnostics: Vec<Diagnostic>,
+    pub timed_out: bool,
+    pub interrupted: bool,
+}
+#[derive(Debug, Clone)]
+pub struct HookContext {
+    pub repo: PathBuf,
+    pub trigger: Trigger,
+    pub index: Option<PathBuf>,
+    pub report: Option<SyncReport>,
+}
+impl HookContext {
+    pub fn new(repo: &Path, trigger: Trigger) -> Self {
+        Self {
+            repo: repo.into(),
+            trigger,
+            index: None,
+            report: None,
+        }
+    }
+}
+#[derive(Debug, Clone, Copy)]
+pub struct HookRunner;
+impl HookRunner {
+    pub fn run(&self, phase: HookPhase, hooks: &[HookConfig], context: &HookContext) -> HookReport {
+        let mut result = HookReport {
+            decision: HookDecision::Allow,
+            diagnostics: vec![],
+            timed_out: false,
+            interrupted: false,
+        };
+        for hook in hooks {
+            let mut spec = CommandSpec::new(&hook.command, &context.repo, hook.timeout);
+            spec.env
+                .insert("RSRS_REPO".into(), context.repo.as_os_str().into());
+            spec.env.insert("RSRS_PHASE".into(), phase.as_str().into());
+            spec.env
+                .insert("RSRS_TRIGGER".into(), context.trigger.as_str().into());
+            if let Some(index) = &context.index {
+                spec.env.extend(index_env(index));
+            }
+            if let Some(report) = &context.report {
+                spec.env
+                    .insert("RSRS_OUTCOME".into(), report.outcome.as_str().into());
+                // Do not export potentially huge hook diagnostics as environment variables.
+                let mut metadata = serde_json::json!({"version":1,"outcome":report.outcome,"trigger":report.trigger,"committed":report.committed,"integrated":report.integrated,"pushed":report.pushed,"recovery":report.recovery}).to_string();
+                if metadata.len() > 16 * 1024 {
+                    metadata = serde_json::json!({"version":1,"outcome":report.outcome,"trigger":report.trigger,"truncated":true}).to_string();
+                }
+                spec.env.insert("RSRS_REPORT_JSON".into(), metadata.into());
+            }
+            let (code, message) = match ProcessRunner.run(&spec) {
+                Ok(output) => {
+                    let message = format!(
+                        "exit {:?}, signal {:?}: {}{}{}",
+                        output.code,
+                        output.signal,
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                        if output.truncated {
+                            " [output truncated]"
+                        } else {
+                            ""
+                        }
+                    );
+                    (output.code, message)
+                }
+                Err(error) => {
+                    result.timed_out |= matches!(error, ProcessError::Timeout(_));
+                    result.interrupted |= matches!(error, ProcessError::Interrupted(_));
+                    (None, error.to_string())
+                }
+            };
+            if code == Some(0) {
+                continue;
+            }
+            result.diagnostics.push(Diagnostic {
+                phase: phase.as_str().into(),
+                message,
+            });
+            if phase == HookPhase::PreCommit {
+                if code.is_some_and(|c| hook.reject_exit_codes.contains(&c)) {
+                    result.decision = HookDecision::RejectCommit;
+                } else {
+                    result.decision = HookDecision::AbortSync;
+                    break;
+                }
+            }
+        }
+        result
+    }
+}

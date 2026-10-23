@@ -1,0 +1,15 @@
+version = 1
+branch = "main"
+remote = "origin"
+quiet_period = "30s"
+interval = "5m"
+git_timeout = "120s"
+lock_timeout = "30s"
+lock_name = "git-rsrs.lock"
+
+# Consumer example only. To interoperate with an existing checkout lock,
+# set lock_name to its agreed filename (for example, docs-maintenance.lock).
+# [[hooks.pre_commit]]
+# command = ["docsctl", "check", "--changed", "--json"]
+# timeout = "30s"
+# reject_exit_codes = [3]

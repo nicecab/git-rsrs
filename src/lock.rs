@@ -1,0 +1,88 @@
+use crate::{
+    config::valid_lock_name,
+    git::{Git, GitError},
+    process::CANCELLED,
+};
+use serde_json::json;
+use std::{
+    fs::{File, OpenOptions, TryLockError},
+    io::{self, Seek, SeekFrom, Write},
+    os::unix::fs::OpenOptionsExt,
+    path::PathBuf,
+    sync::atomic::Ordering,
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum LockError {
+    #[error("checkout lock timed out: {path}")]
+    Timeout { path: PathBuf },
+    #[error("lock acquisition interrupted")]
+    Interrupted,
+    #[error(transparent)]
+    Git(#[from] GitError),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+}
+#[derive(Debug)]
+pub struct CheckoutLock {
+    file: File,
+}
+impl CheckoutLock {
+    pub fn acquire(git: &Git, name: &str, timeout: Duration) -> Result<Self, LockError> {
+        if !valid_lock_name(name) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "unsafe checkout lock filename",
+            )
+            .into());
+        }
+        let path = git.path(name)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(&path)?;
+        let deadline = Instant::now() + timeout;
+        let mut reported_wait = false;
+        loop {
+            // flock operates on the live owned descriptor, never on a pid file.
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(TryLockError::WouldBlock) => {}
+                Err(TryLockError::Error(error)) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(TryLockError::Error(error)) => return Err(error.into()),
+            }
+            if !reported_wait {
+                eprintln!("waiting for checkout lock: {}", path.display());
+                reported_wait = true;
+            }
+            if CANCELLED.load(Ordering::Relaxed) {
+                return Err(LockError::Interrupted);
+            }
+            if Instant::now() >= deadline {
+                return Err(LockError::Timeout { path });
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let mut lock = Self { file };
+        lock.file.seek(SeekFrom::Start(0))?;
+        lock.file.set_len(0)?;
+        let metadata = json!({"pid":std::process::id().to_string(),"hostname":std::env::var("HOSTNAME").unwrap_or_else(|_|"localhost".into()),"operation":"git-rsrs sync","acquired_at":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs().to_string()});
+        lock.file.write_all(metadata.to_string().as_bytes())?;
+        lock.file.sync_all()?;
+        Ok(lock)
+    }
+}
+impl Drop for CheckoutLock {
+    fn drop(&mut self) {
+        let _ = self.file.set_len(0);
+        let _ = self.file.sync_all();
+        let _ = self.file.unlock();
+    }
+}
