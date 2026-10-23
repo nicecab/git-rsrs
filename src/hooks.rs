@@ -31,6 +31,7 @@ pub struct HookReport {
     pub decision: HookDecision,
     pub diagnostics: Vec<Diagnostic>,
     pub timed_out: bool,
+    pub interrupted: bool,
 }
 #[derive(Debug, Clone)]
 pub struct HookContext {
@@ -57,6 +58,7 @@ impl HookRunner {
             decision: HookDecision::Allow,
             diagnostics: vec![],
             timed_out: false,
+            interrupted: false,
         };
         for hook in hooks {
             let mut spec = CommandSpec::new(&hook.command, &context.repo, hook.timeout);
@@ -102,6 +104,7 @@ impl HookRunner {
                 }
                 Err(error) => {
                     result.timed_out |= matches!(error, ProcessError::Timeout(_));
+                    result.interrupted |= matches!(error, ProcessError::Interrupted(_));
                     (None, error.to_string(), true)
                 }
             };

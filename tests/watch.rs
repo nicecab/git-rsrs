@@ -35,12 +35,11 @@ impl WatchChild {
         let stdout = child.stdout.take().unwrap();
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
-                if let Ok(line) = line {
-                    if let Ok(report) = serde_json::from_str(&line) {
-                        if tx.send(report).is_err() {
-                            break;
-                        }
-                    }
+                if let Ok(line) = line
+                    && let Ok(report) = serde_json::from_str(&line)
+                    && tx.send(report).is_err()
+                {
+                    break;
                 }
             }
         });

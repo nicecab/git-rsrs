@@ -158,33 +158,33 @@ pub fn watch_with_reports(
                 return Err(WatchError::Worker);
             }
         }
-        if overflow.swap(false, Ordering::Relaxed) && !git.status()?.is_empty() {
-            if let Some(request) = scheduler.on_event(SchedulerEvent::LocalChange, Instant::now()) {
-                start_run(
-                    config,
-                    &git,
-                    &mut scheduler,
-                    &mut worker,
-                    &report_tx,
-                    request,
-                )?;
-            }
+        if overflow.swap(false, Ordering::Relaxed)
+            && !git.status()?.is_empty()
+            && let Some(request) = scheduler.on_event(SchedulerEvent::LocalChange, Instant::now())
+        {
+            start_run(
+                config,
+                &git,
+                &mut scheduler,
+                &mut worker,
+                &report_tx,
+                request,
+            )?;
         }
         match event_rx.recv_timeout(Duration::from_millis(20)) {
             Ok(event) => {
-                if reconcile_event(&git, event)? {
-                    if let Some(request) =
+                if reconcile_event(&git, event)?
+                    && let Some(request) =
                         scheduler.on_event(SchedulerEvent::LocalChange, Instant::now())
-                    {
-                        start_run(
-                            config,
-                            &git,
-                            &mut scheduler,
-                            &mut worker,
-                            &report_tx,
-                            request,
-                        )?;
-                    }
+                {
+                    start_run(
+                        config,
+                        &git,
+                        &mut scheduler,
+                        &mut worker,
+                        &report_tx,
+                        request,
+                    )?;
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => return Err(WatchError::Worker),

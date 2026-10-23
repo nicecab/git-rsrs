@@ -71,21 +71,27 @@ fn manual(message: impl Into<String>) -> Failure {
 
 pub fn sync_once(config: &Config, trigger: Trigger) -> SyncReport {
     let mut report = SyncReport::new(trigger);
-    if let Err(failure) = sync_locked(config, &mut report) {
+    let mut checkout_root = config.repo.clone();
+    if let Err(failure) = sync_locked(config, &mut report, &mut checkout_root) {
         report.outcome = failure.outcome;
         report.diagnostic("sync", failure.message);
         report.recovery.extend(failure.recovery);
     }
     // sync_locked has returned and dropped its checkout lock before reporting.
-    let mut context = HookContext::new(&config.repo, trigger);
+    let mut context = HookContext::new(&checkout_root, trigger);
     context.report = Some(report.clone());
     let hooks = HookRunner.run(HookPhase::OnResult, &config.hooks.on_result, &context);
     report.diagnostics.extend(hooks.diagnostics);
     report
 }
-fn sync_locked(config: &Config, report: &mut SyncReport) -> Result<(), Failure> {
+fn sync_locked(
+    config: &Config,
+    report: &mut SyncReport,
+    checkout_root: &mut std::path::PathBuf,
+) -> Result<(), Failure> {
     let mut git = Git::open(&config.repo, ProcessRunner)?;
     git.timeout = config.git_timeout;
+    *checkout_root = git.root.clone();
     let _lock =
         CheckoutLock::acquire(&git, &config.lock_name, config.lock_timeout).map_err(|error| {
             Failure {
@@ -141,7 +147,9 @@ fn sync_locked(config: &Config, report: &mut SyncReport) -> Result<(), Failure> 
         match checks.decision {
             HookDecision::AbortSync => {
                 return Err(Failure {
-                    outcome: if checks.timed_out {
+                    outcome: if checks.interrupted {
+                        Outcome::ManualIntervention
+                    } else if checks.timed_out {
                         Outcome::TimedOut
                     } else {
                         Outcome::Failed

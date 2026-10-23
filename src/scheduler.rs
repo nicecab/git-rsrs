@@ -55,11 +55,11 @@ impl Scheduler {
                 }
             }
             SchedulerEvent::RunFinished(outcome) => {
-                if let Some(generation) = self.in_flight.take() {
-                    if generation == self.generation {
-                        self.pending_local = false;
-                        self.last_change = None;
-                    }
+                if let Some(generation) = self.in_flight.take()
+                    && generation == self.generation
+                {
+                    self.pending_local = false;
+                    self.last_change = None;
                 }
                 if outcome == Outcome::Deferred {
                     self.pending_local = true;

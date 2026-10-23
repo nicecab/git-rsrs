@@ -159,8 +159,8 @@ fn sigterm_during_integration_stops_children_and_retains_recovery_state() {
     }
     if status.is_none() {
         child.kill().unwrap();
-        status = Some(child.wait().unwrap());
     }
+    let status = child.wait().unwrap();
     if let Ok(pid) = fs::read_to_string(&ready)
         .unwrap_or_default()
         .parse::<i32>()
@@ -170,7 +170,7 @@ fn sigterm_during_integration_stops_children_and_retains_recovery_state() {
         }
     }
     assert!(ready.exists());
-    assert_eq!(status.unwrap().code(), Some(4));
+    assert_eq!(status.code(), Some(4));
     assert!(f.a.join(".git/git-rsrs-integrate.json").exists());
     let report = sync_once(&config(&f), Trigger::Manual);
     assert_eq!(report.outcome, Outcome::ManualIntervention);

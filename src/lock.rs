@@ -40,7 +40,7 @@ impl CheckoutLock {
             .into());
         }
         let path = git.path(name)?;
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
@@ -69,20 +69,16 @@ impl CheckoutLock {
             }
             thread::sleep(Duration::from_millis(10));
         }
-        let mut lock = Self {
-            file: file.try_clone()?,
-        };
-        file.seek(SeekFrom::Start(0))?;
-        file.set_len(0)?;
+        let mut lock = Self { file };
+        lock.file.seek(SeekFrom::Start(0))?;
+        lock.file.set_len(0)?;
         let metadata = json!({"pid":std::process::id().to_string(),"hostname":std::env::var("HOSTNAME").unwrap_or_else(|_|"localhost".into()),"operation":"git-rsrs sync","acquired_at":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs().to_string()});
-        file.write_all(
+        lock.file.write_all(
             serde_json::to_string(&metadata)
                 .expect("metadata is serializable")
                 .as_bytes(),
         )?;
-        file.sync_all()?;
-        // Keep one descriptor so RAII release always refers to the same lock inode.
-        lock.file = file;
+        lock.file.sync_all()?;
         Ok(lock)
     }
 }
