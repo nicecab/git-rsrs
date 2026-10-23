@@ -1,3 +1,4 @@
+pub mod integrate;
 pub mod snapshot;
 pub mod status;
 use crate::process::{CommandOutput, CommandSpec, ProcessError, ProcessRunner};
