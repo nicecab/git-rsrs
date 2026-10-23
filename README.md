@@ -134,7 +134,7 @@ stdout and stderr are drained independently and each captured stream is capped a
 
 ```toml
 [[hooks.pre_commit]]
-command = ["docsctl", "check", "--changed", "--json"]
+command = ["/absolute/path/to/pre_commit", "--check"]
 timeout = "30s"
 reject_exit_codes = [3]
 
@@ -146,9 +146,6 @@ timeout = "10s"
 command = ["/absolute/path/to/report-sync-result"]
 timeout = "5s"
 ```
-
-This example is consumer configuration. The core contains no docsctl dependency or
-documentation policy. A Python docsctl can remain independent of this Rust binary.
 
 | Phase | Result policy |
 | --- | --- |
@@ -179,8 +176,8 @@ overrides are cleared so they cannot redirect an invocation to another checkout.
 
 The POSIX flock file lives at `git rev-parse --git-path <lock_name>`. Other tools can
 coordinate by locking the same inode with an exclusive `fcntl.flock` in Python or
-POSIX flock in another language. For an existing docsctl consumer, configure
-`lock_name = "docs-maintenance.lock"`. Read-only validators do not reacquire it.
+POSIX flock in another language. Configure the same `lock_name` in all cooperating
+tools. Read-only validators do not reacquire it.
 
 Lock-owner JSON contains string fields `pid`, `hostname`, `operation` and
 `acquired_at` (Unix seconds). The kernel lock is authoritative; stale metadata does
