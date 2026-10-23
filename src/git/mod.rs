@@ -127,3 +127,49 @@ fn path_output(mut raw: Vec<u8>) -> PathBuf {
     }
     PathBuf::from(OsString::from_vec(raw))
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepositoryState {
+    Ready,
+    Unborn,
+    DetachedHead,
+    Merging,
+    Rebasing,
+    ApplyingPatches,
+    CherryPicking,
+    Reverting,
+    Bisecting,
+    Sequencing,
+}
+impl Git {
+    pub fn state(&self) -> Result<RepositoryState, GitError> {
+        for (marker, state) in [
+            ("MERGE_HEAD", RepositoryState::Merging),
+            ("rebase-merge", RepositoryState::Rebasing),
+            ("CHERRY_PICK_HEAD", RepositoryState::CherryPicking),
+            ("REVERT_HEAD", RepositoryState::Reverting),
+            ("BISECT_START", RepositoryState::Bisecting),
+            ("sequencer", RepositoryState::Sequencing),
+        ] {
+            if self.path(marker)?.exists() {
+                return Ok(state);
+            }
+        }
+        let apply = self.path("rebase-apply")?;
+        if apply.exists() {
+            return Ok(if apply.join("rebasing").exists() {
+                RepositoryState::Rebasing
+            } else {
+                RepositoryState::ApplyingPatches
+            });
+        }
+        if self.branch().is_err() {
+            return Ok(RepositoryState::DetachedHead);
+        }
+        match self.head() {
+            Ok(_) => Ok(RepositoryState::Ready),
+            Err(GitError::Command { .. }) => Ok(RepositoryState::Unborn),
+            Err(e) => Err(e),
+        }
+    }
+}

@@ -28,6 +28,8 @@ fn validates_configuration_and_uses_documented_defaults() {
         "version = 1\nbranch = 'main'\nquiet_period = '0s'",
         "version = 1\nbranch = 'main'\ninterval = '-1s'",
         "version = 1\nbranch = 'main'\nlock_name = '../index'",
+        "version = 1\nbranch = 'main'\nlock_name = 'config'",
+        "version = 1\nbranch = 'main'\nlock_name = 'index.lock'",
         "version = 1\nbranch = 'main'\n[[hooks.pre_commit]]\ncommand = []",
         "version = 1\nbranch = 'main'\n[[hooks.pre_commit]]\ncommand = ['x']\nreject_exit_codes = [0]",
         "version = 1\nbranch = 'main'\n[[hooks.pre_commit]]\ncommand = ['x']\nreject_exit_codes = [3,3]",

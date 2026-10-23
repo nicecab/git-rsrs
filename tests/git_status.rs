@@ -83,3 +83,44 @@ fn linux_non_utf8_file_is_visible_to_git() {
     let entries = Git::open(&f.a, ProcessRunner).unwrap().status().unwrap();
     assert!(entries.iter().any(|e| e.path.as_os_str() == raw));
 }
+
+#[test]
+fn inspection_preserves_preexisting_git_operations() {
+    use git_rsrs::git::RepositoryState;
+    let f = Fixture::new();
+    let g = Git::open(&f.a, ProcessRunner).unwrap();
+    assert_eq!(g.state().unwrap(), RepositoryState::Ready);
+    for (marker, state, is_dir) in [
+        ("MERGE_HEAD", RepositoryState::Merging, false),
+        ("rebase-merge", RepositoryState::Rebasing, true),
+        ("rebase-apply", RepositoryState::ApplyingPatches, true),
+        ("CHERRY_PICK_HEAD", RepositoryState::CherryPicking, false),
+        ("REVERT_HEAD", RepositoryState::Reverting, false),
+        ("BISECT_START", RepositoryState::Bisecting, false),
+    ] {
+        let path = g.path(marker).unwrap();
+        if is_dir {
+            fs::create_dir(&path).unwrap();
+        } else {
+            fs::write(&path, "marker").unwrap();
+        }
+        assert_eq!(g.state().unwrap(), state);
+        assert!(path.exists());
+        if is_dir {
+            fs::remove_dir(path).unwrap();
+        } else {
+            fs::remove_file(path).unwrap();
+        }
+    }
+    git(&f.a, ["checkout", "--detach"]);
+    assert_eq!(g.state().unwrap(), RepositoryState::DetachedHead);
+    let empty = f.temp.path().join("empty");
+    git(
+        f.temp.path(),
+        [std::ffi::OsStr::new("init"), empty.as_os_str()],
+    );
+    assert_eq!(
+        Git::open(&empty, ProcessRunner).unwrap().state().unwrap(),
+        RepositoryState::Unborn
+    );
+}

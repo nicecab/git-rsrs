@@ -102,12 +102,10 @@ impl Config {
         if config.remote.trim().is_empty() || config.remote.starts_with('-') {
             return Err(invalid("remote must be nonempty and cannot start with '-'"));
         }
-        if config.lock_name.is_empty()
-            || config.lock_name.contains(['/', '\\'])
-            || config.lock_name.contains("..")
-            || config.lock_name == "."
-        {
-            return Err(invalid("lock_name must be a plain filename"));
+        if !valid_lock_name(&config.lock_name) {
+            return Err(invalid(
+                "lock_name must be a non-reserved plain .lock filename",
+            ));
         }
         for hook in config
             .hooks
@@ -130,4 +128,22 @@ impl Config {
         }
         Ok(config)
     }
+}
+
+pub fn valid_lock_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.ends_with(".lock")
+        && !name.contains(['/', '\\', '\0'])
+        && !name.contains("..")
+        && !matches!(
+            name,
+            "index.lock"
+                | "HEAD.lock"
+                | "config.lock"
+                | "packed-refs.lock"
+                | "shallow.lock"
+                | "ORIG_HEAD.lock"
+                | "FETCH_HEAD.lock"
+                | "commit-graph.lock"
+        )
 }
