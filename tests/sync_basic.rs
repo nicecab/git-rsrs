@@ -88,3 +88,15 @@ fn json_cli_ignores_foreign_repository_location_environment() {
     assert_eq!(text(&f.b, &["rev-parse", "HEAD"]), original_b);
     assert_eq!(text(&f.origin, &["show", "main:new"]), "right repo");
 }
+
+#[test]
+fn periodic_run_discovering_new_local_edits_defers_instead_of_committing() {
+    let f = Fixture::new();
+    let c = config(&f);
+    let head = text(&f.a, &["rev-parse", "HEAD"]);
+    fs::write(f.a.join("new"), "just saved").unwrap();
+    let report = sync_once(&c, Trigger::Periodic);
+    assert_eq!(report.outcome, Outcome::Deferred);
+    assert!(report.committed.is_none());
+    assert_eq!(text(&f.a, &["rev-parse", "HEAD"]), head);
+}

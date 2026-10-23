@@ -125,6 +125,10 @@ fn sync_locked(config: &Config, report: &mut SyncReport) -> Result<(), Failure> 
     let context = HookContext::new(&git.root, report.trigger);
     let mut rejected = false;
     if !git.status()?.is_empty() {
+        if matches!(report.trigger, Trigger::Initial | Trigger::Periodic) {
+            report.outcome = Outcome::Deferred;
+            return Ok(());
+        }
         let candidate = Snapshot::capture(&git)?;
         let mut validation_context = context.clone();
         validation_context.index = Some(candidate.index.clone());
