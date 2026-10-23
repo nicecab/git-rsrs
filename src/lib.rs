@@ -4,4 +4,6 @@ pub mod hooks;
 pub mod lock;
 pub mod outcome;
 pub mod process;
+pub mod scheduler;
 pub mod sync;
+pub mod watch;

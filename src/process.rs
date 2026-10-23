@@ -109,6 +109,9 @@ fn drain(
 
 impl ProcessRunner {
     pub fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, ProcessError> {
+        if CANCELLED.load(Ordering::Relaxed) {
+            return Err(ProcessError::Interrupted(CommandOutput::default()));
+        }
         let executable = spec
             .argv
             .first()

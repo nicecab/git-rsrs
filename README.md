@@ -40,3 +40,19 @@ Safety and recovery:
   working tree and stash. Remove recovery markers only after a deliberate repair.
 - Never remove a Git `index.lock` while its owning process is alive. The rsrs
   advisory lock file itself is persistent and must not be unlinked.
+
+Watch mode combines local event detection with periodic remote reconciliation:
+
+```sh
+git-rsrs --repo /path/to/checkout --config /path/to/config.toml watch
+```
+
+By default, the last local edit must be followed by 30 quiet seconds before
+validation and commit. Every relevant edit resets that deadline. There is no
+maximum waiting time; continuous editing also postpones periodic integration.
+The periodic interval defaults to five minutes. Dirty startup observes the same
+quiet period. Ignored untracked files and Git internals do not reset the timer;
+tracked ignored files still count. Events received during sync stay pending.
+A manual-intervention result pauses automatic mutations until watch is restarted
+after repair. SIGINT/SIGTERM stops new work and terminates active command groups;
+interrupted operations may leave recovery journals requiring inspection.

@@ -19,6 +19,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     Sync,
+    Watch,
 }
 fn main() {
     if let Err(error) = git_rsrs::process::install_signal_handlers() {
@@ -40,16 +41,36 @@ fn main() {
             std::process::exit(2)
         }
     };
-    let report = match cli.command {
-        Commands::Sync => sync_once(&config, Trigger::Manual),
-    };
+    match cli.command {
+        Commands::Sync => {
+            let report = sync_once(&config, Trigger::Manual);
+            render(&report, cli.json);
+            std::process::exit(report.outcome.exit_code());
+        }
+        Commands::Watch => {
+            if let Err(error) =
+                git_rsrs::watch::watch_with_reports(&config, |report| render(&report, cli.json))
+            {
+                eprintln!("{error}");
+                std::process::exit(
+                    if matches!(error, git_rsrs::watch::WatchError::Interrupted) {
+                        4
+                    } else {
+                        1
+                    },
+                );
+            }
+        }
+    }
+}
+fn render(report: &git_rsrs::outcome::SyncReport, json: bool) {
     for diagnostic in &report.diagnostics {
         eprintln!("{}: {}", diagnostic.phase, diagnostic.message);
     }
-    if cli.json {
+    if json {
         println!(
             "{}",
-            serde_json::to_string(&report).expect("serializable report")
+            serde_json::to_string(report).expect("serializable report")
         );
     } else {
         println!("{}", report.outcome.as_str());
@@ -57,5 +78,4 @@ fn main() {
             eprintln!("recovery: {recovery}");
         }
     }
-    std::process::exit(report.outcome.exit_code());
 }
