@@ -26,6 +26,11 @@ pub struct Snapshot {
 }
 impl Snapshot {
     pub fn capture(git: &Git) -> Result<Self, GitError> {
+        if git.has_unmerged()? {
+            return Err(GitError::Invalid(
+                "unmerged index entries require manual resolution".into(),
+            ));
+        }
         if git.path("git-rsrs-commit.json")?.exists() {
             return Err(GitError::Invalid(
                 "unfinished commit publication; inspect git-rsrs-commit.json before retrying"

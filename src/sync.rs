@@ -70,9 +70,17 @@ fn manual(message: impl Into<String>) -> Failure {
 }
 
 pub fn sync_once(config: &Config, trigger: Trigger) -> SyncReport {
+    sync_once_guarded(config, trigger, || true)
+}
+
+pub fn sync_once_guarded(
+    config: &Config,
+    trigger: Trigger,
+    fresh: impl Fn() -> bool,
+) -> SyncReport {
     let mut report = SyncReport::new(trigger);
     let mut checkout_root = config.repo.clone();
-    if let Err(failure) = sync_locked(config, &mut report, &mut checkout_root) {
+    if let Err(failure) = sync_locked(config, &mut report, &mut checkout_root, &fresh) {
         report.outcome = failure.outcome;
         report.diagnostic("sync", failure.message);
         report.recovery.extend(failure.recovery);
@@ -88,6 +96,7 @@ fn sync_locked(
     config: &Config,
     report: &mut SyncReport,
     checkout_root: &mut std::path::PathBuf,
+    fresh: &dyn Fn() -> bool,
 ) -> Result<(), Failure> {
     let mut git = Git::open(&config.repo, ProcessRunner)?;
     git.timeout = config.git_timeout;
@@ -97,6 +106,8 @@ fn sync_locked(
             Failure {
                 outcome: if matches!(error, LockError::Timeout { .. }) {
                     Outcome::LockTimeout
+                } else if matches!(error, LockError::Interrupted) {
+                    Outcome::ManualIntervention
                 } else {
                     Outcome::Failed
                 },
@@ -128,6 +139,11 @@ fn sync_locked(
         report.outcome = Outcome::BranchSkipped;
         return Ok(());
     }
+    if !fresh() {
+        report.outcome = Outcome::Deferred;
+        return Ok(());
+    }
+    let mut expected_head = git.head()?;
     let context = HookContext::new(&git.root, report.trigger);
     let mut rejected = false;
     if !git.status()?.is_empty() {
@@ -159,31 +175,62 @@ fn sync_locked(
                 });
             }
             HookDecision::RejectCommit => rejected = true,
-            HookDecision::Allow => match candidate.commit_validated(&git)? {
-                CommitResult::Created(oid) => report.committed = Some(oid),
-                CommitResult::NoChanges => {}
-                CommitResult::DeferredConcurrentChange => {
+            HookDecision::Allow => {
+                if !fresh() {
                     report.outcome = Outcome::Deferred;
                     return Ok(());
                 }
-                CommitResult::RecoveryRequired(message) => {
-                    return Err(Failure {
-                        outcome: Outcome::ManualIntervention,
-                        recovery: vec![message.clone()],
-                        message,
-                    });
+                match candidate.commit_validated(&git)? {
+                    CommitResult::Created(oid) => {
+                        expected_head = oid.clone();
+                        report.committed = Some(oid);
+                    }
+                    CommitResult::NoChanges => {}
+                    CommitResult::DeferredConcurrentChange => {
+                        report.outcome = Outcome::Deferred;
+                        return Ok(());
+                    }
+                    CommitResult::RecoveryRequired(message) => {
+                        return Err(Failure {
+                            outcome: Outcome::ManualIntervention,
+                            recovery: vec![message.clone()],
+                            message,
+                        });
+                    }
                 }
-            },
+            }
         }
     }
+    require_identity(&git, config, &expected_head)?;
     git.fetch(&config.remote, &config.branch)?;
+    require_identity(&git, config, &expected_head)?;
     let mut post_failed = false;
-    integrate(&git, config, report, &context, &mut post_failed)?;
+    integrate(
+        &git,
+        config,
+        report,
+        &context,
+        &mut post_failed,
+        &mut expected_head,
+    )?;
+    require_identity(&git, config, &expected_head)?;
     if git.ahead(&config.remote, &config.branch)? {
-        if git.push(&config.remote, &config.branch)? == PushResult::NonFastForward {
+        if git.push(&config.remote, &config.branch, &expected_head)? == PushResult::NonFastForward {
+            require_identity(&git, config, &expected_head)?;
             git.fetch(&config.remote, &config.branch)?;
-            integrate(&git, config, report, &context, &mut post_failed)?;
-            if git.push(&config.remote, &config.branch)? == PushResult::NonFastForward {
+            require_identity(&git, config, &expected_head)?;
+            integrate(
+                &git,
+                config,
+                report,
+                &context,
+                &mut post_failed,
+                &mut expected_head,
+            )?;
+            require_identity(&git, config, &expected_head)?;
+            if git.push(&config.remote, &config.branch, &expected_head)?
+                == PushResult::NonFastForward
+            {
                 return Err(manual(
                     "push was rejected again after one retry; retry synchronization later",
                 ));
@@ -208,9 +255,21 @@ fn integrate(
     report: &mut SyncReport,
     context: &HookContext,
     post_failed: &mut bool,
+    expected_head: &mut String,
 ) -> Result<(), Failure> {
+    require_identity(git, config, expected_head)?;
     match git.integrate(&config.remote, &config.branch)? {
-        Integration::Integrated { changed } => report.integrated |= changed,
+        Integration::Integrated { changed } => {
+            if git.branch()? != config.branch || git.state()? != RepositoryState::Ready {
+                return Err(manual("checkout changed during integration"));
+            }
+            if changed {
+                *expected_head = git.head()?;
+            } else {
+                require_identity(git, config, expected_head)?;
+            }
+            report.integrated |= changed;
+        }
         Integration::RebaseConflict { recovery }
         | Integration::StashRestoreConflict { recovery }
         | Integration::RecoveryRequired { recovery } => {
@@ -228,5 +287,17 @@ fn integrate(
     );
     *post_failed |= !hooks.diagnostics.is_empty();
     report.diagnostics.extend(hooks.diagnostics);
+    Ok(())
+}
+
+fn require_identity(git: &Git, config: &Config, expected_head: &str) -> Result<(), Failure> {
+    if git.branch()? != config.branch
+        || git.head()? != expected_head
+        || git.state()? != RepositoryState::Ready
+    {
+        return Err(manual(
+            "checkout branch, HEAD or Git state changed during synchronization; no further mutations were attempted",
+        ));
+    }
     Ok(())
 }

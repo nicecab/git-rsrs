@@ -168,3 +168,26 @@ fn watcher_error_reconciles_actual_dirty_status() {
     fs::write(f.a.join("missed"), "keep").unwrap();
     assert!(git_rsrs::watch::reconcile_event(&g, Err(error())).unwrap());
 }
+
+#[test]
+fn review_edits_during_lock_wait_must_receive_a_new_quiet_period() {
+    use std::os::fd::AsRawFd;
+    let f = Fixture::new();
+    let lock = fs::File::create(f.a.join(".git/git-rsrs.lock")).unwrap();
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    fs::write(f.a.join("new"), "first").unwrap();
+    let watcher = WatchChild::start(&f, "700ms", "100ms");
+    thread::sleep(Duration::from_millis(1200));
+    fs::write(f.a.join("new"), "LAST EDIT").unwrap();
+    let last = Instant::now();
+    unsafe {
+        libc::flock(lock.as_raw_fd(), libc::LOCK_UN);
+    }
+    watcher.committed();
+    assert!(
+        last.elapsed() >= Duration::from_millis(700),
+        "committed after {:?}",
+        last.elapsed()
+    );
+    assert_eq!(text(&f.origin, &["show", "main:new"]), "LAST EDIT");
+}

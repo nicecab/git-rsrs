@@ -79,3 +79,64 @@ impl Fixture {
         git(repo, ["commit", "-m", "test change"]);
     }
 }
+
+pub struct Barrier {
+    pub ready: PathBuf,
+    pub release: PathBuf,
+}
+impl Barrier {
+    pub fn wait(&self) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !self.ready.exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.ready.exists()
+    }
+    pub fn release(&self) {
+        fs::write(&self.release, "continue").unwrap();
+    }
+}
+pub fn barrier_hook(f: &Fixture, name: &str) -> Barrier {
+    use std::os::unix::fs::PermissionsExt;
+    let hooks = f.temp.path().join("barrier-hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    let barrier = Barrier {
+        ready: f.temp.path().join("barrier-ready"),
+        release: f.temp.path().join("barrier-release"),
+    };
+    let code = format!(
+        "#!/usr/bin/env python3\nfrom pathlib import Path\nimport time\nPath({:?}).touch()\ndeadline=time.monotonic()+8\nwhile not Path({:?}).exists():\n if time.monotonic()>deadline: raise SystemExit(1)\n time.sleep(.01)\n",
+        barrier.ready.to_str().unwrap(),
+        barrier.release.to_str().unwrap()
+    );
+    let script = hooks.join(name);
+    fs::write(&script, code).unwrap();
+    fs::set_permissions(script, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &f.a,
+        [
+            OsStr::new("config"),
+            "core.hooksPath".as_ref(),
+            hooks.as_os_str(),
+        ],
+    );
+    barrier
+}
+pub fn spawn_sync(f: &Fixture, config: &str) -> std::process::Child {
+    let cfg = f.temp.path().join("async-sync.toml");
+    fs::write(&cfg, config).unwrap();
+    std::process::Command::new(env!("CARGO_BIN_EXE_git-rsrs"))
+        .arg("--repo")
+        .arg(&f.a)
+        .arg("--config")
+        .arg(cfg)
+        .args(["--json", "sync"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap()
+}
+pub fn finish_sync(child: std::process::Child) -> git_rsrs::outcome::SyncReport {
+    let output = child.wait_with_output().unwrap();
+    serde_json::from_slice(&output.stdout).unwrap()
+}

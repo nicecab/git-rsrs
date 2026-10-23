@@ -146,6 +146,7 @@ pub enum RepositoryState {
     Reverting,
     Bisecting,
     Sequencing,
+    Unmerged,
 }
 impl Git {
     pub fn state(&self) -> Result<RepositoryState, GitError> {
@@ -169,6 +170,9 @@ impl Git {
                 RepositoryState::ApplyingPatches
             });
         }
+        if self.has_unmerged()? {
+            return Ok(RepositoryState::Unmerged);
+        }
         if self.branch().is_err() {
             return Ok(RepositoryState::DetachedHead);
         }
@@ -177,5 +181,14 @@ impl Git {
             Err(GitError::Command { .. }) => Ok(RepositoryState::Unborn),
             Err(e) => Err(e),
         }
+    }
+}
+
+impl Git {
+    pub fn has_unmerged(&self) -> Result<bool, GitError> {
+        Ok(!self
+            .run(["ls-files", "--unmerged", "-z"])?
+            .stdout
+            .is_empty())
     }
 }

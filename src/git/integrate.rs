@@ -32,8 +32,13 @@ impl Git {
             &format!("refs/remotes/{remote}/{branch}..HEAD"),
         ])? != "0")
     }
-    pub fn push(&self, remote: &str, branch: &str) -> Result<PushResult, GitError> {
-        let refspec = format!("HEAD:refs/heads/{branch}");
+    pub fn push(
+        &self,
+        remote: &str,
+        branch: &str,
+        expected_head: &str,
+    ) -> Result<PushResult, GitError> {
+        let refspec = format!("{expected_head}:refs/heads/{branch}");
         match self.run(["push", "--porcelain", "--", remote, &refspec]) {
             Ok(_) => Ok(PushResult::Accepted),
             Err(GitError::Command { ref output, .. })
@@ -57,6 +62,20 @@ impl Git {
         if self.state()? != super::RepositoryState::Ready {
             return Ok(Integration::RecoveryRequired { recovery: vec!["Git changed state before integration; refusing to abort or overwrite another operation".into()] });
         }
+        let collisions = self.ignored_collisions(&target)?;
+        if !collisions.is_empty() {
+            return Ok(Integration::RecoveryRequired {
+                recovery: collisions
+                    .into_iter()
+                    .map(|p| {
+                        format!(
+                            "ignored local path obstructs incoming tracked content: {}",
+                            p.display()
+                        )
+                    })
+                    .collect(),
+            });
+        }
         let original_head = self.head()?;
         let target_oid = self.text(["rev-parse", &target])?;
         let journal = self.path("git-rsrs-integrate.json")?;
@@ -76,44 +95,23 @@ impl Git {
             "--autostash",
             &target,
         ]);
-        let mut conflicted = false;
-        if result.is_err() {
-            let active = self.path("rebase-merge")?.exists() || self.path("rebase-apply")?.exists();
-            if active {
-                let directory = if self.path("rebase-merge")?.exists() {
-                    self.path("rebase-merge")?
-                } else {
-                    self.path("rebase-apply")?
-                };
-                let belongs_to_run = fs::read_to_string(directory.join("orig-head"))
-                    .is_ok_and(|s| s.trim() == original_head)
-                    && fs::read_to_string(directory.join("onto"))
-                        .is_ok_and(|s| s.trim() == target_oid);
-                if !belongs_to_run {
-                    return Ok(Integration::RecoveryRequired {
-                        recovery: vec![format!(
-                            "rebase ownership is ambiguous; inspect {}",
-                            journal.display()
-                        )],
-                    });
+        let active = self.path("rebase-merge")?.exists() || self.path("rebase-apply")?.exists();
+        if result.is_err() && active {
+            // Abort can hard-reset edits made by a concurrent editor. Retain the
+            // operation instead of asserting that matching refs prove preservation.
+            let mut recovery = vec![format!(
+                "active rebase retained to preserve concurrent edits; inspect {}",
+                journal.display()
+            )];
+            for marker in ["rebase-merge/autostash", "rebase-apply/autostash"] {
+                if let Ok(id) = fs::read_to_string(self.path(marker)?) {
+                    recovery.push(format!("retained autostash object {}", id.trim()));
                 }
-                // Only abort the matching rebase started by this run.
-                if self
-                    .run(["-c", "commit.gpgsign=false", "rebase", "--abort"])
-                    .is_err()
-                {
-                    return Ok(Integration::RecoveryRequired {
-                        recovery: vec![format!(
-                            "owned rebase could not be aborted; inspect {}",
-                            journal.display()
-                        )],
-                    });
-                }
-                conflicted = matches!(&result, Err(GitError::Command { .. }));
             }
+            return Ok(Integration::RebaseConflict { recovery });
         }
-        let unmerged = match self.run(["ls-files", "--unmerged", "-z"]) {
-            Ok(o) => !o.stdout.is_empty(),
+        let unmerged = match self.has_unmerged() {
+            Ok(value) => value,
             Err(_) => {
                 return Ok(Integration::RecoveryRequired {
                     recovery: vec![format!(
@@ -123,28 +121,72 @@ impl Git {
                 });
             }
         };
-        if unmerged {
-            let after = self.text(["stash", "list", "--format=%H"])?;
-            let mut recovery = after
-                .lines()
-                .filter(|id| !before.lines().any(|old| old == *id))
-                .map(|id| format!("retained autostash {id}"))
+        let after = match self.text(["stash", "list", "--format=%H"]) {
+            Ok(value) => value,
+            Err(_) => {
+                return Ok(Integration::RecoveryRequired {
+                    recovery: vec![format!(
+                        "cannot verify autostash restoration; inspect {}",
+                        journal.display()
+                    )],
+                });
+            }
+        };
+        let added = after
+            .lines()
+            .filter(|id| !before.lines().any(|old| old == *id))
+            .collect::<Vec<_>>();
+        if unmerged || !added.is_empty() {
+            let mut recovery = added
+                .into_iter()
+                .map(|id| {
+                    format!("stash added during integration; verify ownership and contents: {id}")
+                })
                 .collect::<Vec<_>>();
             recovery.push(format!(
-                "resolve restored working-tree conflicts; inspect {}",
+                "autostash restoration is incomplete or ambiguous; inspect {}",
                 journal.display()
             ));
             return Ok(Integration::StashRestoreConflict { recovery });
         }
         fs::remove_file(journal)?;
-        if conflicted {
-            return Ok(Integration::RebaseConflict {
-                recovery: vec![
-                    "rebase was aborted; original local commits and edits were retained".into(),
-                ],
-            });
-        }
         result?;
         Ok(Integration::Integrated { changed: true })
+    }
+}
+
+impl Git {
+    fn ignored_collisions(&self, target: &str) -> Result<Vec<std::path::PathBuf>, GitError> {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt, path::PathBuf};
+        let paths = |bytes: Vec<u8>| {
+            bytes
+                .split(|b| *b == 0)
+                .filter(|s| !s.is_empty())
+                .map(|s| PathBuf::from(OsString::from_vec(s.to_vec())))
+                .collect::<Vec<_>>()
+        };
+        let incoming = paths(
+            self.run(["ls-tree", "-r", "--name-only", "-z", target])?
+                .stdout,
+        );
+        let ignored = paths(
+            self.run([
+                "ls-files",
+                "--others",
+                "--directory",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+            ])?
+            .stdout,
+        );
+        Ok(ignored
+            .into_iter()
+            .filter(|local| {
+                incoming
+                    .iter()
+                    .any(|remote| local.starts_with(remote) || remote.starts_with(local))
+            })
+            .collect())
     }
 }

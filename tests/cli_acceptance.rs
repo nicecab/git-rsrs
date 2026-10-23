@@ -184,3 +184,35 @@ fn result_hooks_run_at_checkout_root_even_when_repo_argument_is_a_subdirectory()
         "{report}"
     );
 }
+
+#[test]
+fn stopping_watch_during_lock_wait_reports_manual_interruption() {
+    use std::os::fd::AsRawFd;
+    let f = Fixture::new();
+    let binary = installed(&f);
+    let cfg = f.temp.path().join("config.toml");
+    fs::write(&cfg, "version=1\nbranch='main'\nquiet_period='50ms'\n").unwrap();
+    fs::write(f.a.join("new"), "pending").unwrap();
+    let lock = fs::File::create(f.a.join(".git/git-rsrs.lock")).unwrap();
+    unsafe {
+        libc::flock(lock.as_raw_fd(), libc::LOCK_EX);
+    }
+    let child = Command::new(binary)
+        .arg("--repo")
+        .arg(&f.a)
+        .arg("--config")
+        .arg(cfg)
+        .args(["--json", "watch"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_millis(700));
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(4));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["outcome"], "manual_intervention");
+}

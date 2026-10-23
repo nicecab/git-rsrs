@@ -1,17 +1,17 @@
 use crate::{
     config::Config,
-    git::{Git, GitError},
+    git::{Git, GitError, RepositoryState, snapshot::Snapshot},
     outcome::{Outcome, SyncReport, Trigger},
     process::{CANCELLED, ProcessRunner},
     scheduler::{RunRequest, Scheduler, SchedulerEvent},
-    sync::sync_once,
+    sync::sync_once_guarded,
 };
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::{
     path::{Component, Path},
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread::{self, JoinHandle},
@@ -97,6 +97,7 @@ pub fn watch_with_reports(
     );
     let (report_tx, report_rx) = mpsc::channel::<SyncReport>();
     let mut worker = WorkerGuard(None);
+    let changes = Arc::new(AtomicU64::new(0));
     eprintln!("watching {}", git.root.display());
     loop {
         if CANCELLED.load(Ordering::Relaxed) {
@@ -131,6 +132,7 @@ pub fn watch_with_reports(
                     &mut scheduler,
                     &mut worker,
                     &report_tx,
+                    &changes,
                     request,
                 )?;
             }
@@ -151,12 +153,16 @@ pub fn watch_with_reports(
                         &mut scheduler,
                         &mut worker,
                         &report_tx,
+                        &changes,
                         request,
                     )?;
                 }
             } else {
                 return Err(WatchError::Worker);
             }
+        }
+        if overflow.load(Ordering::Relaxed) {
+            changes.fetch_add(1, Ordering::Relaxed);
         }
         if overflow.swap(false, Ordering::Relaxed)
             && !git.status()?.is_empty()
@@ -168,23 +174,27 @@ pub fn watch_with_reports(
                 &mut scheduler,
                 &mut worker,
                 &report_tx,
+                &changes,
                 request,
             )?;
         }
         match event_rx.recv_timeout(Duration::from_millis(20)) {
             Ok(event) => {
-                if reconcile_event(&git, event)?
-                    && let Some(request) =
+                if reconcile_event(&git, event)? {
+                    changes.fetch_add(1, Ordering::Relaxed);
+                    if let Some(request) =
                         scheduler.on_event(SchedulerEvent::LocalChange, Instant::now())
-                {
-                    start_run(
-                        config,
-                        &git,
-                        &mut scheduler,
-                        &mut worker,
-                        &report_tx,
-                        request,
-                    )?;
+                    {
+                        start_run(
+                            config,
+                            &git,
+                            &mut scheduler,
+                            &mut worker,
+                            &report_tx,
+                            &changes,
+                            request,
+                        )?;
+                    }
                 }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => return Err(WatchError::Worker),
@@ -197,6 +207,7 @@ pub fn watch_with_reports(
                 &mut scheduler,
                 &mut worker,
                 &report_tx,
+                &changes,
                 request,
             )?;
         }
@@ -208,6 +219,7 @@ fn start_run(
     scheduler: &mut Scheduler,
     worker: &mut Option<JoinHandle<()>>,
     tx: &mpsc::Sender<SyncReport>,
+    changes: &Arc<AtomicU64>,
     request: RunRequest,
 ) -> Result<(), WatchError> {
     // Reconcile status before a periodic/initial run: native watcher delivery can lag.
@@ -218,11 +230,28 @@ fn start_run(
         );
         return Ok(());
     }
+    let baseline = if request.trigger == Trigger::LocalChange
+        && git.state()? == RepositoryState::Ready
+        && !git.path("git-rsrs-commit.json")?.exists()
+        && !git.path("git-rsrs-integrate.json")?.exists()
+    {
+        Some(Snapshot::capture(git)?)
+    } else {
+        None
+    };
+    let changes = changes.clone();
+    let generation = changes.load(Ordering::Relaxed);
+    let observed_git = git.clone();
     let config = config.clone();
     let tx = tx.clone();
     debug_assert!(worker.is_none());
     *worker = Some(thread::spawn(move || {
-        let report = sync_once(&config, request.trigger);
+        let report = sync_once_guarded(&config, request.trigger, || {
+            changes.load(Ordering::Relaxed) == generation
+                && baseline
+                    .as_ref()
+                    .is_none_or(|snapshot| snapshot.unchanged(&observed_git).unwrap_or(false))
+        });
         let _ = tx.send(report);
     }));
     Ok(())

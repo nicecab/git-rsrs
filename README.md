@@ -31,7 +31,7 @@ reconciliation; it does not need a second timer invoking `sync`. A manually invo
 
 The configured branch is required. A different checked-out branch is skipped;
 rsrs never switches branches. Existing merge/rebase/cherry-pick/revert/bisect states,
-unborn repositories, and detached HEAD require manual intervention. Unresolved
+unborn repositories, detached HEAD, and unmerged index entries require manual intervention. Unresolved
 recovery journals and another Git index lock also prevent automatic mutations.
 
 ## Configuration
@@ -68,7 +68,10 @@ checkout. The lock name must be a plain, non-reserved `.lock` filename; Git's ow
 
 A successful validation authorizes the pinned candidate, not arbitrary later
 edits. If the working tree or index changes during validation, the run defers.
-Subsequent edits cannot enter the pinned candidate automatically. Native Git hooks
+Subsequent edits cannot enter the pinned candidate automatically. Watch carries a
+change-generation and content token through checkout-lock waits; changed tokens
+restart the quiet period. Branch/HEAD identity is rechecked after network waits,
+and push uses the expected commit ID rather than a late resolution of HEAD. Native Git hooks
 still run; native and external validation hooks must be read-only in v1. A native
 hook that changes the candidate index violates that contract and causes recovery
 handling before rsrs will push the resulting commit.
@@ -167,6 +170,12 @@ protects shared reference updates.
 `--json sync` writes one versioned JSON report to stdout. Watch writes one report
 per completed run. Diagnostics go to stderr. Reports include the primary outcome,
 trigger, created commit, integration/push facts, diagnostics and recovery references.
+A failed active rebase is retained for manual recovery rather than automatically
+aborted: abort can erase concurrent editor changes. Ignored local files are checked
+for collisions before integration; ignored directories are protected as units, so
+incoming tracked content beneath one also requires manual attention. A retained
+autostash requires intervention even when the index has no unmerged entries.
+
 A fatal outcome takes precedence over validation rejection; reporting-hook failures
 never replace the primary result.
 

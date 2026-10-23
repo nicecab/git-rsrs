@@ -86,3 +86,38 @@ fn server_hook_rejection_is_not_retried_as_a_push_race() {
     assert_eq!(fs::read_to_string(count).unwrap(), "1");
     assert!(report.committed.is_some());
 }
+
+#[test]
+fn review_branch_switch_during_fetch_cannot_publish_feature_work_to_main() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let barrier = common::Barrier {
+        ready: f.temp.path().join("ready"),
+        release: f.temp.path().join("release"),
+    };
+    let upload = f.temp.path().join("upload.py");
+    fs::write(&upload,format!("#!/usr/bin/env python3\nimport os,sys,time,pathlib\npathlib.Path({:?}).touch()\ndeadline=time.monotonic()+8\nwhile not pathlib.Path({:?}).exists():\n if time.monotonic()>deadline: raise SystemExit(1)\n time.sleep(.01)\nos.execvp('git-upload-pack',['git-upload-pack',*sys.argv[1:]])\n",barrier.ready.to_str().unwrap(),barrier.release.to_str().unwrap())).unwrap();
+    fs::set_permissions(&upload, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &f.a,
+        [
+            std::ffi::OsStr::new("config"),
+            "remote.origin.uploadpack".as_ref(),
+            upload.as_os_str(),
+        ],
+    );
+    let original = text(&f.origin, &["rev-parse", "main"]);
+    let child = spawn_sync(&f, "version=1\nbranch='main'");
+    let ready = barrier.wait();
+    git(&f.a, ["checkout", "-b", "feature"]);
+    f.commit(&f.a, "feature-only", "not for main");
+    let feature = text(&f.a, &["rev-parse", "HEAD"]);
+    barrier.release();
+    let report = finish_sync(child);
+    assert!(ready);
+    assert_eq!(report.outcome, Outcome::ManualIntervention, "{report:?}");
+    assert!(!report.pushed);
+    assert_eq!(text(&f.origin, &["rev-parse", "main"]), original);
+    assert_eq!(text(&f.a, &["rev-parse", "HEAD"]), feature);
+    assert_eq!(text(&f.a, &["branch", "--show-current"]), "feature");
+}
