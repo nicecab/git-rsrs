@@ -197,7 +197,61 @@ fn stopping_watch_during_lock_wait_reports_manual_interruption() {
     unsafe {
         libc::flock(lock.as_raw_fd(), libc::LOCK_EX);
     }
-    let child = Command::new(binary)
+    let mut child = Command::new(binary)
+        .arg("--repo")
+        .arg(&f.a)
+        .arg("--config")
+        .arg(cfg)
+        .args(["--json", "watch"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let stderr = child.stderr.take().unwrap();
+    thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let _ = tx.send(line);
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut waiting = false;
+    while let Ok(line) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+        if line.starts_with("waiting for checkout lock:") {
+            waiting = true;
+            break;
+        }
+    }
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    let output = child.wait_with_output().unwrap();
+    assert!(waiting, "watch never reached checkout-lock acquisition");
+    assert_eq!(output.status.code(), Some(4));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["outcome"], "manual_intervention");
+}
+
+#[test]
+fn stopping_watch_during_initial_git_inspection_is_graceful() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new();
+    let binary = installed(&f);
+    let cfg = f.temp.path().join("config.toml");
+    fs::write(&cfg, "version=1\nbranch='main'").unwrap();
+    let ready = f.temp.path().join("inspection-ready");
+    let monitor = f.temp.path().join("fsmonitor.py");
+    fs::write(&monitor,format!("#!/usr/bin/env python3\nimport pathlib,time\npathlib.Path({:?}).touch()\ntime.sleep(20)\n",ready.to_str().unwrap())).unwrap();
+    fs::set_permissions(&monitor, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &f.a,
+        [
+            std::ffi::OsStr::new("config"),
+            "core.fsmonitor".as_ref(),
+            monitor.as_os_str(),
+        ],
+    );
+    let mut child = Command::new(binary)
         .arg("--repo")
         .arg(&f.a)
         .arg("--config")
@@ -207,12 +261,26 @@ fn stopping_watch_during_lock_wait_reports_manual_interruption() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    thread::sleep(Duration::from_millis(700));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !ready.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
     unsafe {
         libc::kill(child.id() as i32, libc::SIGTERM);
     }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if child.try_wait().unwrap().is_none() {
+        child.kill().unwrap();
+    }
     let output = child.wait_with_output().unwrap();
-    assert_eq!(output.status.code(), Some(4));
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["outcome"], "manual_intervention");
+    assert!(ready.exists());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }

@@ -9,7 +9,8 @@ repository-specific policy runs through external command hooks.
 Requires Git and the Rust toolchain pinned in `rust-toolchain.toml` to build.
 Runtime requires Git, credentials configured for the selected remote, and any
 executables used by hooks. Supported targets are Linux x86_64 and macOS arm64/x86_64.
-Linux release binaries are built on Ubuntu 24.04 and require a compatible glibc.
+Linux release binaries use musl static linking so they do not require a matching
+glibc version.
 
 ```sh
 cargo build --locked --release
@@ -263,8 +264,11 @@ cargo build --locked --release
 ```
 
 Tests use isolated local bare remotes and multiple clones, not real user repos.
-Python 3 is used by interoperability and child-process fixtures. CI runs on Linux,
-Apple Silicon macOS and Intel macOS. GitHub Actions dependencies are pinned to
+Python 3 is used by interoperability and child-process fixtures. CI separates
+formatting, clippy/documentation checks and platform tests, with Rust build caches.
+Tests and optimized binary startup run on Linux musl, Apple Silicon macOS and
+Intel macOS. RustSec dependency audits run on dependency changes, weekly, and
+before release publication. GitHub Actions dependencies are pinned to
 full commit SHAs with version comments. The release workflow tests and packages
 all three supported targets and publishes archives/checksums only when a maintainer
 explicitly pushes a `v<package-version>` tag. No service activation, consumer

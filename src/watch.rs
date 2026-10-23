@@ -71,10 +71,18 @@ pub fn watch(config: &Config) -> Result<(), WatchError> {
     watch_with_reports(config, |report| println!("{}", report.outcome.as_str()))
 }
 
-pub fn watch_with_reports(
-    config: &Config,
-    mut emit: impl FnMut(SyncReport),
-) -> Result<(), WatchError> {
+pub fn watch_with_reports(config: &Config, emit: impl FnMut(SyncReport)) -> Result<(), WatchError> {
+    match watch_loop(config, emit) {
+        Err(WatchError::Git(GitError::Process(crate::process::ProcessError::Interrupted(_))))
+            if CANCELLED.load(Ordering::Relaxed) =>
+        {
+            Ok(())
+        }
+        result => result,
+    }
+}
+
+fn watch_loop(config: &Config, mut emit: impl FnMut(SyncReport)) -> Result<(), WatchError> {
     let mut git = Git::open(&config.repo, ProcessRunner)?;
     git.timeout = config.git_timeout;
     let (event_tx, event_rx) = mpsc::sync_channel::<notify::Result<Event>>(1024);
@@ -99,51 +107,31 @@ pub fn watch_with_reports(
     let mut worker = WorkerGuard(None);
     let changes = Arc::new(AtomicU64::new(0));
     eprintln!("watching {}", git.root.display());
-    loop {
-        if CANCELLED.load(Ordering::Relaxed) {
-            scheduler.on_event(SchedulerEvent::Shutdown, Instant::now());
-            drop(watcher);
-            if let Some(handle) = worker.take() {
-                handle.join().map_err(|_| WatchError::Worker)?;
-                if let Ok(report) = report_rx.try_recv() {
-                    emit(report);
+    let result = (|| {
+        loop {
+            if CANCELLED.load(Ordering::Relaxed) {
+                scheduler.on_event(SchedulerEvent::Shutdown, Instant::now());
+                drop(watcher);
+                if let Some(handle) = worker.take() {
+                    handle.join().map_err(|_| WatchError::Worker)?;
+                    if let Ok(report) = report_rx.try_recv() {
+                        emit(report);
+                    }
+                    return Err(WatchError::Interrupted);
                 }
-                return Err(WatchError::Interrupted);
+                return Ok(());
             }
-            return Ok(());
-        }
-        if let Ok(report) = report_rx.try_recv() {
-            if let Some(handle) = worker.take() {
-                handle.join().map_err(|_| WatchError::Worker)?;
-            }
-            let outcome = report.outcome;
-            emit(report);
-            if outcome == Outcome::ManualIntervention {
-                eprintln!(
-                    "automatic synchronization paused; repair the reported state and restart watch"
-                );
-            }
-            if let Some(request) =
-                scheduler.on_event(SchedulerEvent::RunFinished(outcome), Instant::now())
-            {
-                start_run(
-                    config,
-                    &git,
-                    &mut scheduler,
-                    &mut worker,
-                    &report_tx,
-                    &changes,
-                    request,
-                )?;
-            }
-        } else if worker.as_ref().is_some_and(|handle| handle.is_finished()) {
-            // A completed worker must publish a report unless it panicked.
-            if worker.take().expect("present worker").join().is_err() {
-                return Err(WatchError::Worker);
-            }
-            if let Ok(report) = report_rx.recv_timeout(Duration::from_millis(50)) {
+            if let Ok(report) = report_rx.try_recv() {
+                if let Some(handle) = worker.take() {
+                    handle.join().map_err(|_| WatchError::Worker)?;
+                }
                 let outcome = report.outcome;
                 emit(report);
+                if outcome == Outcome::ManualIntervention {
+                    eprintln!(
+                        "automatic synchronization paused; repair the reported state and restart watch"
+                    );
+                }
                 if let Some(request) =
                     scheduler.on_event(SchedulerEvent::RunFinished(outcome), Instant::now())
                 {
@@ -157,33 +145,16 @@ pub fn watch_with_reports(
                         request,
                     )?;
                 }
-            } else {
-                return Err(WatchError::Worker);
-            }
-        }
-        if overflow.load(Ordering::Relaxed) {
-            changes.fetch_add(1, Ordering::Relaxed);
-        }
-        if overflow.swap(false, Ordering::Relaxed)
-            && !git.status()?.is_empty()
-            && let Some(request) = scheduler.on_event(SchedulerEvent::LocalChange, Instant::now())
-        {
-            start_run(
-                config,
-                &git,
-                &mut scheduler,
-                &mut worker,
-                &report_tx,
-                &changes,
-                request,
-            )?;
-        }
-        match event_rx.recv_timeout(Duration::from_millis(20)) {
-            Ok(event) => {
-                if reconcile_event(&git, event)? {
-                    changes.fetch_add(1, Ordering::Relaxed);
+            } else if worker.as_ref().is_some_and(|handle| handle.is_finished()) {
+                // A completed worker must publish a report unless it panicked.
+                if worker.take().expect("present worker").join().is_err() {
+                    return Err(WatchError::Worker);
+                }
+                if let Ok(report) = report_rx.recv_timeout(Duration::from_millis(50)) {
+                    let outcome = report.outcome;
+                    emit(report);
                     if let Some(request) =
-                        scheduler.on_event(SchedulerEvent::LocalChange, Instant::now())
+                        scheduler.on_event(SchedulerEvent::RunFinished(outcome), Instant::now())
                     {
                         start_run(
                             config,
@@ -195,23 +166,80 @@ pub fn watch_with_reports(
                             request,
                         )?;
                     }
+                } else {
+                    return Err(WatchError::Worker);
                 }
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(WatchError::Worker),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            if overflow.load(Ordering::Relaxed) {
+                changes.fetch_add(1, Ordering::Relaxed);
+            }
+            if overflow.swap(false, Ordering::Relaxed)
+                && !git.status()?.is_empty()
+                && let Some(request) =
+                    scheduler.on_event(SchedulerEvent::LocalChange, Instant::now())
+            {
+                start_run(
+                    config,
+                    &git,
+                    &mut scheduler,
+                    &mut worker,
+                    &report_tx,
+                    &changes,
+                    request,
+                )?;
+            }
+            match event_rx.recv_timeout(Duration::from_millis(20)) {
+                Ok(event) => {
+                    if reconcile_event(&git, event)? {
+                        changes.fetch_add(1, Ordering::Relaxed);
+                        if let Some(request) =
+                            scheduler.on_event(SchedulerEvent::LocalChange, Instant::now())
+                        {
+                            start_run(
+                                config,
+                                &git,
+                                &mut scheduler,
+                                &mut worker,
+                                &report_tx,
+                                &changes,
+                                request,
+                            )?;
+                        }
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Err(WatchError::Worker),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            if let Some(request) = scheduler.on_event(SchedulerEvent::PeriodicTick, Instant::now())
+            {
+                start_run(
+                    config,
+                    &git,
+                    &mut scheduler,
+                    &mut worker,
+                    &report_tx,
+                    &changes,
+                    request,
+                )?;
+            }
         }
-        if let Some(request) = scheduler.on_event(SchedulerEvent::PeriodicTick, Instant::now()) {
-            start_run(
-                config,
-                &git,
-                &mut scheduler,
-                &mut worker,
-                &report_tx,
-                &changes,
-                request,
-            )?;
+    })();
+    // Cancellation may arrive while the event loop is inspecting Git, rather
+    // than at its explicit cancellation check. Still join/report the worker.
+    if CANCELLED.load(Ordering::Relaxed)
+        && result.is_err()
+        && !matches!(&result, Err(WatchError::Interrupted))
+    {
+        if let Some(handle) = worker.take() {
+            handle.join().map_err(|_| WatchError::Worker)?;
+            if let Ok(report) = report_rx.try_recv() {
+                emit(report);
+            }
+            return Err(WatchError::Interrupted);
         }
+        return Ok(());
     }
+    result
 }
 fn start_run(
     config: &Config,

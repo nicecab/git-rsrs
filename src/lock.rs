@@ -49,6 +49,7 @@ impl CheckoutLock {
             .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(&path)?;
         let deadline = Instant::now() + timeout;
+        let mut reported_wait = false;
         loop {
             // flock operates on the live owned descriptor, never on a pid file.
             if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
@@ -60,6 +61,10 @@ impl CheckoutLock {
                 io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
             ) {
                 return Err(error.into());
+            }
+            if !reported_wait {
+                eprintln!("waiting for checkout lock: {}", path.display());
+                reported_wait = true;
             }
             if CANCELLED.load(Ordering::Relaxed) {
                 return Err(LockError::Interrupted);
