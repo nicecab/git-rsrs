@@ -1,10 +1,15 @@
 #![allow(dead_code)]
-use git_rsrs::process::{CommandOutput, CommandSpec, ProcessRunner};
+use git_rsrs::{
+    config::Config,
+    process::{CommandOutput, CommandSpec, ProcessRunner},
+};
 use std::{
     ffi::OsStr,
     fs,
     path::{Path, PathBuf},
-    time::Duration,
+    process::Child,
+    thread,
+    time::{Duration, Instant},
 };
 
 // Phase readiness can take longer on shared CI hosts. Behavioral timeout and
@@ -77,11 +82,41 @@ impl Fixture {
         identity(&b);
         Self { temp, origin, a, b }
     }
+    pub fn config(&self) -> Config {
+        let mut c = Config::parse("version=1\nbranch='main'").unwrap();
+        c.repo = self.a.clone();
+        c
+    }
     pub fn commit(&self, repo: &Path, name: &str, content: &str) {
         fs::write(repo.join(name), content).unwrap();
         git(repo, ["add", "-A"]);
         git(repo, ["commit", "-m", "test change"]);
     }
+}
+
+/// Polls until `path` exists or the phase timeout elapses.
+pub fn wait_for(path: &Path) -> bool {
+    let deadline = Instant::now() + PHASE_TIMEOUT;
+    while !path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    path.exists()
+}
+/// Sends SIGTERM, then SIGKILL if the child has not exited within `grace`.
+/// Returns whether the child exited within `grace`.
+pub fn terminate(child: &mut Child, grace: Duration) -> bool {
+    unsafe {
+        libc::kill(child.id() as i32, libc::SIGTERM);
+    }
+    let deadline = Instant::now() + grace;
+    while Instant::now() < deadline {
+        if child.try_wait().unwrap().is_some() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let _ = child.kill();
+    false
 }
 
 pub struct Barrier {
@@ -90,11 +125,7 @@ pub struct Barrier {
 }
 impl Barrier {
     pub fn wait(&self) -> bool {
-        let deadline = std::time::Instant::now() + PHASE_TIMEOUT;
-        while !self.ready.exists() && std::time::Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        self.ready.exists()
+        wait_for(&self.ready)
     }
     pub fn release(&self) {
         fs::write(&self.release, "continue").unwrap();

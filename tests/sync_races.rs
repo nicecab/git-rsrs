@@ -7,8 +7,7 @@ use git_rsrs::{
 };
 use std::{fs, os::unix::fs::PermissionsExt};
 fn race(f: &Fixture, always: bool) -> (Config, std::path::PathBuf) {
-    let mut c = Config::parse("version=1\nbranch='main'").unwrap();
-    c.repo = f.a.clone();
+    let c = f.config();
     let hooks = f.temp.path().join("hooks");
     fs::create_dir(&hooks).unwrap();
     let count = f.temp.path().join("push-count");
@@ -57,8 +56,7 @@ fn second_competing_push_is_not_retried_indefinitely() {
 #[test]
 fn server_hook_rejection_is_not_retried_as_a_push_race() {
     let f = Fixture::new();
-    let mut c = Config::parse("version=1\nbranch='main'").unwrap();
-    c.repo = f.a.clone();
+    let c = f.config();
     let hooks = f.temp.path().join("hooks");
     fs::create_dir(&hooks).unwrap();
     let count = f.temp.path().join("push-count");

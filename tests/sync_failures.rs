@@ -7,8 +7,7 @@ use git_rsrs::{
 };
 use std::{fs, time::Duration};
 fn setup(f: &Fixture, message: &str, sleep: bool) -> Config {
-    let mut c = Config::parse("version=1\nbranch='main'").unwrap();
-    c.repo = f.a.clone();
+    let c = f.config();
     git(
         &f.a,
         ["remote", "set-url", "origin", "ssh://test.invalid/repo"],
@@ -58,8 +57,7 @@ fn authentication_and_timeout_have_distinct_outcomes() {
 #[test]
 fn result_hook_failure_does_not_replace_success() {
     let f = Fixture::new();
-    let mut c = Config::parse("version=1\nbranch='main'").unwrap();
-    c.repo = f.a.clone();
+    let mut c = f.config();
     c.hooks.on_result.push(HookConfig {
         command: vec![
             "python3".into(),

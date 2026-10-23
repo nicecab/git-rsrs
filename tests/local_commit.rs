@@ -178,10 +178,7 @@ fn commit_worker() {
 
 #[test]
 fn killed_commit_retains_a_journal_and_original_index_for_manual_recovery() {
-    use std::{
-        process::Command,
-        time::{Duration, Instant},
-    };
+    use std::process::Command;
     let f = Fixture::new();
     let g = Git::open(&f.a, ProcessRunner).unwrap();
     fs::write(f.a.join("shared.txt"), "candidate").unwrap();
@@ -207,10 +204,7 @@ fn killed_commit_retains_a_journal_and_original_index_for_manual_recovery() {
         .stdout(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + PHASE_TIMEOUT;
-    while !ready.exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    wait_for(&ready);
     child.kill().unwrap();
     child.wait().unwrap();
     if let Ok(pid) = fs::read_to_string(&ready)

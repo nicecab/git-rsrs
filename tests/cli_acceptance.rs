@@ -116,25 +116,8 @@ fn stopping_active_watch_reports_interruption_and_does_not_leave_hooks_running()
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + PHASE_TIMEOUT;
-    while !ready.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    unsafe {
-        libc::kill(child.id() as i32, libc::SIGTERM);
-    }
-    let deadline = Instant::now() + Duration::from_secs(4);
-    let mut finished = false;
-    while Instant::now() < deadline {
-        if child.try_wait().unwrap().is_some() {
-            finished = true;
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    if !finished {
-        child.kill().unwrap();
-    }
+    wait_for(&ready);
+    let finished = terminate(&mut child, Duration::from_secs(4));
     let output = child.wait_with_output().unwrap();
     let group = fs::read_to_string(&ready).unwrap().parse::<i32>().unwrap();
     let group_alive = unsafe { libc::kill(-group, 0) } == 0;
@@ -261,20 +244,8 @@ fn stopping_watch_during_initial_git_inspection_is_graceful() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + PHASE_TIMEOUT;
-    while !ready.exists() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    unsafe {
-        libc::kill(child.id() as i32, libc::SIGTERM);
-    }
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while child.try_wait().unwrap().is_none() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(10));
-    }
-    if child.try_wait().unwrap().is_none() {
-        child.kill().unwrap();
-    }
+    wait_for(&ready);
+    terminate(&mut child, Duration::from_secs(5));
     let output = child.wait_with_output().unwrap();
     assert!(ready.exists());
     assert_eq!(

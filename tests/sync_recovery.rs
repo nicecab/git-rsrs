@@ -9,13 +9,8 @@ use std::{
     fs,
     os::unix::fs::PermissionsExt,
     process::{Command, Stdio},
-    time::{Duration, Instant},
+    time::Duration,
 };
-fn config(f: &Fixture) -> Config {
-    let mut c = Config::parse("version=1\nbranch='main'").unwrap();
-    c.repo = f.a.clone();
-    c
-}
 fn reject(c: &mut Config) {
     c.hooks.pre_commit.push(HookConfig {
         command: vec![
@@ -31,7 +26,7 @@ fn reject(c: &mut Config) {
 #[test]
 fn rejected_edits_survive_integration_while_existing_commits_push() {
     let f = Fixture::new();
-    let mut c = config(&f);
+    let mut c = f.config();
     reject(&mut c);
     fs::write(f.a.join("shared.txt"), "old stash\n").unwrap();
     git(&f.a, ["stash", "push", "-m", "existing user stash"]);
@@ -58,7 +53,7 @@ fn rejected_edits_survive_integration_while_existing_commits_push() {
 #[test]
 fn stash_restore_conflict_retains_stash_and_blocks_future_mutations() {
     let f = Fixture::new();
-    let mut c = config(&f);
+    let mut c = f.config();
     reject(&mut c);
     f.commit(&f.b, "shared.txt", "remote edit\n");
     git(&f.b, ["push"]);
@@ -78,7 +73,7 @@ fn stash_restore_conflict_retains_stash_and_blocks_future_mutations() {
 #[test]
 fn untracked_collision_does_not_overwrite_or_remove_local_content() {
     let f = Fixture::new();
-    let mut c = config(&f);
+    let mut c = f.config();
     reject(&mut c);
     f.commit(&f.b, "collision", "remote\n");
     git(&f.b, ["push"]);
@@ -95,7 +90,7 @@ fn untracked_collision_does_not_overwrite_or_remove_local_content() {
 #[test]
 fn rebase_conflict_retains_operation_and_local_commits_for_manual_recovery() {
     let f = Fixture::new();
-    let c = config(&f);
+    let c = f.config();
     f.commit(&f.a, "shared.txt", "local committed\n");
     let head = text(&f.a, &["rev-parse", "HEAD"]);
     f.commit(&f.b, "shared.txt", "remote committed\n");
@@ -144,25 +139,8 @@ fn sigterm_during_integration_stops_children_and_retains_recovery_state() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let deadline = Instant::now() + PHASE_TIMEOUT;
-    while !ready.exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    unsafe {
-        libc::kill(child.id() as i32, libc::SIGTERM);
-    }
-    let deadline = Instant::now() + Duration::from_secs(4);
-    let mut status = None;
-    while Instant::now() < deadline {
-        status = child.try_wait().unwrap();
-        if status.is_some() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    if status.is_none() {
-        child.kill().unwrap();
-    }
+    wait_for(&ready);
+    terminate(&mut child, Duration::from_secs(4));
     let status = child.wait().unwrap();
     if let Ok(pid) = fs::read_to_string(&ready)
         .unwrap_or_default()
@@ -175,14 +153,14 @@ fn sigterm_during_integration_stops_children_and_retains_recovery_state() {
     assert!(ready.exists());
     assert_eq!(status.code(), Some(4));
     assert!(f.a.join(".git/git-rsrs-integrate.json").exists());
-    let report = sync_once(&config(&f), Trigger::Manual);
+    let report = sync_once(&f.config(), Trigger::Manual);
     assert_eq!(report.outcome, Outcome::ManualIntervention);
 }
 
 #[test]
 fn review_existing_stash_apply_conflict_is_never_committed() {
     let f = Fixture::new();
-    let c = config(&f);
+    let c = f.config();
     fs::write(f.a.join("shared.txt"), "stashed local\n").unwrap();
     git(&f.a, ["stash", "push"]);
     f.commit(&f.a, "shared.txt", "new committed\n");
@@ -227,7 +205,7 @@ fn review_ignored_files_and_directory_collisions_are_preserved() {
         ("ignored-parent", "ignored-parent/remote"),
     ] {
         let f = Fixture::new();
-        let c = config(&f);
+        let c = f.config();
         fs::write(
             f.a.join(".git/info/exclude"),
             "ignored-file\nignored-dir/\nignored-parent\n",
@@ -294,7 +272,7 @@ fn review_retained_autostash_without_unmerged_entries_stops_before_push() {
 #[test]
 fn review_ignored_content_is_protected_from_intermediate_replayed_commits() {
     let f = Fixture::new();
-    let c = config(&f);
+    let c = f.config();
     f.commit(&f.a, "temporary", "committed temporarily");
     fs::remove_file(f.a.join("temporary")).unwrap();
     git(&f.a, ["add", "-A"]);

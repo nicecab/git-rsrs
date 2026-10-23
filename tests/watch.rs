@@ -60,17 +60,7 @@ impl WatchChild {
 }
 impl Drop for WatchChild {
     fn drop(&mut self) {
-        unsafe {
-            libc::kill(self.child.id() as i32, libc::SIGTERM);
-        }
-        let deadline = Instant::now() + Duration::from_secs(4);
-        while Instant::now() < deadline {
-            if self.child.try_wait().unwrap().is_some() {
-                return;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        let _ = self.child.kill();
+        terminate(&mut self.child, Duration::from_secs(4));
         let _ = self.child.wait();
     }
 }

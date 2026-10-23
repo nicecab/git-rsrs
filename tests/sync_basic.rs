@@ -1,21 +1,15 @@
 mod common;
 use common::*;
 use git_rsrs::{
-    config::Config,
     outcome::{Outcome, Trigger},
     sync::sync_once,
 };
 use std::fs;
-fn config(f: &Fixture) -> Config {
-    let mut c = Config::parse("version=1\nbranch='main'").unwrap();
-    c.repo = f.a.clone();
-    c
-}
 
 #[test]
 fn no_changes_is_a_noop_and_local_changes_reach_origin() {
     let f = Fixture::new();
-    let c = config(&f);
+    let c = f.config();
     assert_eq!(sync_once(&c, Trigger::Manual).outcome, Outcome::Noop);
     fs::write(f.a.join("new"), "local\n").unwrap();
     let report = sync_once(&c, Trigger::Manual);
@@ -28,7 +22,7 @@ fn no_changes_is_a_noop_and_local_changes_reach_origin() {
 #[test]
 fn remote_only_changes_arrive_and_diverged_changes_are_rebased() {
     let f = Fixture::new();
-    let c = config(&f);
+    let c = f.config();
     f.commit(&f.b, "remote", "incoming\n");
     git(&f.b, ["push"]);
     let report = sync_once(&c, Trigger::Periodic);
@@ -51,7 +45,7 @@ fn remote_only_changes_arrive_and_diverged_changes_are_rebased() {
 #[test]
 fn branch_guard_does_not_commit_switch_or_push_a_feature_branch() {
     let f = Fixture::new();
-    let c = config(&f);
+    let c = f.config();
     git(&f.a, ["checkout", "-b", "feature"]);
     fs::write(f.a.join("private"), "keep\n").unwrap();
     let head = text(&f.a, &["rev-parse", "HEAD"]);
@@ -92,7 +86,7 @@ fn json_cli_ignores_foreign_repository_location_environment() {
 #[test]
 fn periodic_run_discovering_new_local_edits_defers_instead_of_committing() {
     let f = Fixture::new();
-    let c = config(&f);
+    let c = f.config();
     let head = text(&f.a, &["rev-parse", "HEAD"]);
     fs::write(f.a.join("new"), "just saved").unwrap();
     let report = sync_once(&c, Trigger::Periodic);
