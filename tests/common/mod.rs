@@ -157,10 +157,34 @@ pub fn barrier_hook(f: &Fixture, name: &str) -> Barrier {
     );
     barrier
 }
+/// Blocks the next fetch from origin in `f.a` until the barrier is released.
+pub fn barrier_upload_pack(f: &Fixture) -> Barrier {
+    use std::os::unix::fs::PermissionsExt;
+    let barrier = Barrier {
+        ready: f.temp.path().join("ready"),
+        release: f.temp.path().join("release"),
+    };
+    let upload = f.temp.path().join("upload.py");
+    fs::write(&upload,format!("#!/usr/bin/env python3\nimport os,sys,time,pathlib\npathlib.Path({:?}).touch()\ndeadline=time.monotonic()+60\nwhile not pathlib.Path({:?}).exists():\n if time.monotonic()>deadline: raise SystemExit(1)\n time.sleep(.01)\nos.execvp('git-upload-pack',['git-upload-pack',*sys.argv[1:]])\n",barrier.ready.to_str().unwrap(),barrier.release.to_str().unwrap())).unwrap();
+    fs::set_permissions(&upload, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &f.a,
+        [
+            OsStr::new("config"),
+            "remote.origin.uploadpack".as_ref(),
+            upload.as_os_str(),
+        ],
+    );
+    barrier
+}
 /// Runs `git-rsrs sync` in a child process. The caller's `GIT_SSH_COMMAND` /
 /// `GIT_SSH` are removed from the child so a repo-local `core.sshCommand`
 /// fixture takes effect; they would otherwise override it.
 pub fn spawn_sync(f: &Fixture, config: &str) -> std::process::Child {
+    spawn_sync_env(f, config, &[])
+}
+/// Like `spawn_sync`, with extra environment variables set on the child.
+pub fn spawn_sync_env(f: &Fixture, config: &str, env: &[(&str, &OsStr)]) -> std::process::Child {
     let cfg = f.temp.path().join("async-sync.toml");
     fs::write(&cfg, config).unwrap();
     std::process::Command::new(env!("CARGO_BIN_EXE_git-rsrs"))
@@ -171,6 +195,7 @@ pub fn spawn_sync(f: &Fixture, config: &str) -> std::process::Child {
         .args(["--json", "sync"])
         .env_remove("GIT_SSH_COMMAND")
         .env_remove("GIT_SSH")
+        .envs(env.iter().copied())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()

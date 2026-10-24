@@ -4,8 +4,8 @@ use std::{fs, path::PathBuf};
 #[derive(Debug)]
 pub enum Integration {
     Integrated { changed: bool },
+    DirtyWorktree,
     RebaseConflict { recovery: Vec<String> },
-    StashRestoreConflict { recovery: Vec<String> },
     RecoveryRequired { recovery: Vec<String> },
 }
 #[derive(Debug, PartialEq, Eq)]
@@ -59,6 +59,10 @@ impl Git {
         if self.state()? != super::RepositoryState::Ready {
             return Ok(Integration::RecoveryRequired { recovery: vec!["Git changed state before integration; refusing to abort or overwrite another operation".into()] });
         }
+        // Only a clean worktree is rebased; dirty content waits untouched.
+        if self.is_dirty()? {
+            return Ok(Integration::DirtyWorktree);
+        }
         let collisions = self.ignored_collisions(&target)?;
         if !collisions.is_empty() {
             return Ok(Integration::RecoveryRequired {
@@ -75,31 +79,29 @@ impl Git {
         }
         let original_head = self.head()?;
         let target_oid = self.text(["rev-parse", &target])?;
-        let before = self.text(["stash", "list", "--format=%H"])?;
-        let metadata = serde_json::json!({"version":1,"head":original_head,"target":target,"target_oid":target_oid,"stash_before":before.lines().collect::<Vec<_>>()});
+        let metadata = serde_json::json!({"version":1,"head":original_head,"target":target,"target_oid":target_oid});
         let journal = &self.paths.integrate_journal;
         self.write_journal(journal, &metadata)?;
+        // Override an inherited rebase.autoStash: an edit landing after the dirty
+        // check must make the rebase refuse, never be stashed and rebased over.
         let result = self.run([
             "-c",
             "commit.gpgsign=false",
+            "-c",
+            "rebase.autoStash=false",
             "rebase",
-            "--autostash",
             &target,
         ]);
         let active = self.paths.rebase_merge.exists() || self.paths.rebase_apply.exists();
         if result.is_err() && active {
             // Abort can hard-reset edits made by a concurrent editor. Retain the
             // operation instead of asserting that matching refs prove preservation.
-            let mut recovery = vec![format!(
-                "active rebase retained to preserve concurrent edits; inspect {}",
-                journal.display()
-            )];
-            for dir in [&self.paths.rebase_merge, &self.paths.rebase_apply] {
-                if let Ok(id) = fs::read_to_string(dir.join("autostash")) {
-                    recovery.push(format!("retained autostash object {}", id.trim()));
-                }
-            }
-            return Ok(Integration::RebaseConflict { recovery });
+            return Ok(Integration::RebaseConflict {
+                recovery: vec![format!(
+                    "active rebase retained to preserve concurrent edits; inspect {}",
+                    journal.display()
+                )],
+            });
         }
         let unmerged = match self.has_unmerged() {
             Ok(value) => value,
@@ -112,35 +114,19 @@ impl Git {
                 });
             }
         };
-        let after = match self.text(["stash", "list", "--format=%H"]) {
-            Ok(value) => value,
-            Err(_) => {
-                return Ok(Integration::RecoveryRequired {
-                    recovery: vec![format!(
-                        "cannot verify autostash restoration; inspect {}",
-                        journal.display()
-                    )],
-                });
-            }
-        };
-        let added = after
-            .lines()
-            .filter(|id| !before.lines().any(|old| old == *id))
-            .collect::<Vec<_>>();
-        if unmerged || !added.is_empty() {
-            let mut recovery = added
-                .into_iter()
-                .map(|id| {
-                    format!("stash added during integration; verify ownership and contents: {id}")
-                })
-                .collect::<Vec<_>>();
-            recovery.push(format!(
-                "autostash restoration is incomplete or ambiguous; inspect {}",
-                journal.display()
-            ));
-            return Ok(Integration::StashRestoreConflict { recovery });
+        if unmerged {
+            return Ok(Integration::RecoveryRequired {
+                recovery: vec![format!(
+                    "integration left unmerged entries; inspect {}",
+                    journal.display()
+                )],
+            });
         }
         fs::remove_file(journal)?;
+        // Git refuses to start over an edit that landed after the dirty check.
+        if matches!(result, Err(GitError::Command { .. })) && self.is_dirty()? {
+            return Ok(Integration::DirtyWorktree);
+        }
         result?;
         Ok(Integration::Integrated { changed: true })
     }
