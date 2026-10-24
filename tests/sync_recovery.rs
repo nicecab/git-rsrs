@@ -11,6 +11,7 @@ use std::{
     process::{Command, Stdio},
     time::Duration,
 };
+const WAITING: &str = "remote has new commits; integration waits for a clean worktree";
 fn reject(c: &mut Config) {
     c.hooks.pre_commit.push(HookConfig {
         command: vec![
@@ -32,8 +33,6 @@ fn rejected_edits_survive_integration_while_existing_commits_push() {
     git(&f.a, ["stash", "push", "-m", "existing user stash"]);
     let stash = text(&f.a, &["rev-parse", "refs/stash"]);
     f.commit(&f.a, "existing", "already committed\n");
-    f.commit(&f.b, "incoming", "remote\n");
-    git(&f.b, ["push"]);
     fs::write(f.a.join("shared.txt"), "rejected edits\n").unwrap();
     let report = sync_once(&c, Trigger::Manual);
     assert_eq!(report.outcome, Outcome::ValidationRejected, "{report:?}");
@@ -51,24 +50,34 @@ fn rejected_edits_survive_integration_while_existing_commits_push() {
     assert_eq!(text(&f.a, &["rev-parse", "refs/stash"]), stash);
 }
 #[test]
-fn stash_restore_conflict_retains_stash_and_blocks_future_mutations() {
+fn rejected_edits_wait_for_a_clean_worktree_when_remote_is_ahead() {
     let f = Fixture::new();
     let mut c = f.config();
     reject(&mut c);
+    f.commit(&f.a, "existing", "already committed\n");
     f.commit(&f.b, "shared.txt", "remote edit\n");
     git(&f.b, ["push"]);
     fs::write(f.a.join("shared.txt"), "local rejected edit\n").unwrap();
-    let report = sync_once(&c, Trigger::Manual);
-    assert_eq!(report.outcome, Outcome::ManualIntervention, "{report:?}");
-    assert!(!report.pushed);
-    assert!(!report.recovery.is_empty());
-    let stash = text(&f.a, &["stash", "list", "--format=%H"]);
-    assert!(!stash.is_empty());
-    let conflicted = fs::read(f.a.join("shared.txt")).unwrap();
-    let report = sync_once(&c, Trigger::Manual);
-    assert_eq!(report.outcome, Outcome::ManualIntervention);
-    assert_eq!(fs::read(f.a.join("shared.txt")).unwrap(), conflicted);
-    assert_eq!(text(&f.a, &["stash", "list", "--format=%H"]), stash);
+    let head = text(&f.a, &["rev-parse", "HEAD"]);
+    let remote = text(&f.origin, &["rev-parse", "main"]);
+    for _ in 0..2 {
+        let report = sync_once(&c, Trigger::Manual);
+        assert_eq!(report.outcome, Outcome::ValidationRejected, "{report:?}");
+        assert!(!report.integrated && !report.pushed);
+        assert!(report.diagnostics.iter().any(|d| d.message == WAITING));
+        assert_eq!(
+            text(&f.a, &["rev-parse", "refs/remotes/origin/main"]),
+            remote
+        );
+        assert_eq!(text(&f.a, &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            fs::read_to_string(f.a.join("shared.txt")).unwrap(),
+            "local rejected edit\n"
+        );
+        assert_eq!(text(&f.a, &["stash", "list"]), "");
+        assert!(!f.a.join(".git/git-rsrs-integrate.json").exists());
+        assert_eq!(text(&f.origin, &["rev-parse", "main"]), remote);
+    }
 }
 #[test]
 fn untracked_collision_does_not_overwrite_or_remove_local_content() {
@@ -230,43 +239,129 @@ fn review_ignored_files_and_directory_collisions_are_preserved() {
     }
 }
 #[test]
-fn review_retained_autostash_without_unmerged_entries_stops_before_push() {
+fn review_edit_racing_the_commit_defers_integration_without_stashing() {
     let f = Fixture::new();
-    f.commit(&f.a, "local", "local");
     f.commit(&f.b, "remote", "remote");
     git(&f.b, ["push"]);
-    fs::write(f.a.join("shared.txt"), "REJECTED BEFORE REBASE\n").unwrap();
-    let barrier = barrier_hook(&f, "post-rewrite");
-    let child = spawn_sync(
-        &f,
-        "version=1\nbranch='main'\n[[hooks.pre_commit]]\ncommand=['python3','-c','import sys;sys.exit(3)']\nreject_exit_codes=[3]",
-    );
+    fs::write(f.a.join("local"), "committed by sync\n").unwrap();
+    let barrier = barrier_upload_pack(&f);
+    let remote = text(&f.origin, &["rev-parse", "main"]);
+    let child = spawn_sync(&f, "version=1\nbranch='main'");
     let ready = barrier.wait();
-    fs::write(f.a.join("shared.txt"), "NEW EDIT DURING REBASE\n").unwrap();
+    fs::write(f.a.join("shared.txt"), "EDIT AFTER COMMIT\n").unwrap();
     barrier.release();
     let report = finish_sync(child);
     assert!(ready);
-    assert_eq!(text(&f.a, &["ls-files", "--unmerged"]), "");
-    assert_eq!(report.outcome, Outcome::ManualIntervention, "{report:?}");
-    assert!(!report.pushed);
-    assert!(!report.recovery.is_empty());
-    assert!(f.a.join(".git/git-rsrs-integrate.json").exists());
+    assert_eq!(report.outcome, Outcome::Deferred, "{report:?}");
+    assert_eq!(
+        Some(text(&f.a, &["rev-parse", "HEAD"])),
+        report.committed,
+        "{report:?}"
+    );
+    assert!(!report.integrated && !report.pushed);
+    assert!(report.diagnostics.iter().any(|d| d.message == WAITING));
+    assert_eq!(text(&f.a, &["stash", "list"]), "");
+    assert!(!f.a.join(".git/git-rsrs-integrate.json").exists());
+    assert_eq!(text(&f.origin, &["rev-parse", "main"]), remote);
     assert_eq!(
         fs::read_to_string(f.a.join("shared.txt")).unwrap(),
-        "NEW EDIT DURING REBASE\n"
+        "EDIT AFTER COMMIT\n"
     );
-    let stash = text(&f.a, &["stash", "list", "--format=%H"]);
-    assert!(!stash.is_empty());
+}
+
+#[test]
+fn review_edit_before_a_rejected_push_defers_the_retry_integration() {
+    let f = Fixture::new();
+    f.commit(&f.b, "remote", "remote");
+    git(&f.b, ["push"]);
+    fs::write(f.a.join("local"), "committed by sync\n").unwrap();
+    let hooks = f.temp.path().join("hooks");
+    fs::create_dir(&hooks).unwrap();
+    let pushed_head = f.temp.path().join("pushed-head");
+    let racing_remote = f.temp.path().join("racing-remote");
+    let hook = hooks.join("pre-push");
+    let script = format!(
+        "#!/usr/bin/env python3\nimport os,subprocess,pathlib\nif not pathlib.Path({pushed_head:?}).exists():\n env={{k:v for k,v in os.environ.items() if not k.startswith('GIT_')}}\n def git(repo,*args): return subprocess.run(['git','-C',repo,*args],env=env,check=True,capture_output=True,text=True).stdout.strip()\n pathlib.Path({pushed_head:?}).write_text(git({a:?},'rev-parse','HEAD'))\n pathlib.Path({race:?}).write_text('race')\n git({b:?},'add','-A'); git({b:?},'commit','-m','race'); git({b:?},'push')\n pathlib.Path({racing_remote:?}).write_text(git({b:?},'rev-parse','HEAD'))\n pathlib.Path({edit:?}).write_text('EDIT BEFORE PUSH\\n')\n",
+        pushed_head = pushed_head.to_str().unwrap(),
+        racing_remote = racing_remote.to_str().unwrap(),
+        a = f.a.to_str().unwrap(),
+        b = f.b.to_str().unwrap(),
+        race = f.b.join("remote-race").to_str().unwrap(),
+        edit = f.a.join("shared.txt").to_str().unwrap(),
+    );
+    fs::write(&hook, script).unwrap();
+    fs::set_permissions(hook, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &f.a,
+        [
+            std::ffi::OsStr::new("config"),
+            "core.hooksPath".as_ref(),
+            hooks.as_os_str(),
+        ],
+    );
+    let report = sync_once(&f.config(), Trigger::Manual);
+    assert_eq!(report.outcome, Outcome::Deferred, "{report:?}");
+    assert!(report.committed.is_some() && report.integrated && !report.pushed);
+    assert!(report.diagnostics.iter().any(|d| d.message == WAITING));
+    let head = fs::read_to_string(pushed_head).unwrap();
+    assert_eq!(text(&f.a, &["rev-parse", "HEAD"]), head);
     assert_eq!(
-        text(
-            &f.a,
-            &[
-                "show",
-                &format!("{}:shared.txt", stash.lines().next().unwrap())
-            ]
-        ),
-        "REJECTED BEFORE REBASE"
+        text(&f.a, &["rev-parse", "HEAD^"]),
+        text(&f.b, &["rev-parse", "HEAD^"])
     );
+    let racing = fs::read_to_string(racing_remote).unwrap();
+    assert_eq!(text(&f.origin, &["rev-parse", "main"]), racing);
+    assert_eq!(
+        text(&f.a, &["rev-parse", "refs/remotes/origin/main"]),
+        racing
+    );
+    assert_eq!(text(&f.a, &["stash", "list"]), "");
+    assert!(!f.a.join(".git/git-rsrs-integrate.json").exists());
+    assert_eq!(
+        fs::read_to_string(f.a.join("shared.txt")).unwrap(),
+        "EDIT BEFORE PUSH\n"
+    );
+}
+
+#[test]
+fn review_edit_after_the_dirty_check_is_never_autostashed_by_git_config() {
+    let f = Fixture::new();
+    f.commit(&f.a, "local", "local");
+    f.commit(&f.b, "shared.txt", "remote edit\n");
+    git(&f.b, ["push"]);
+    git(&f.a, ["config", "rebase.autoStash", "true"]);
+    // A `git` wrapper on PATH edits a tracked file just before the rebase
+    // process starts, i.e. after the dirty check and before Git's own
+    // autostash decision (a pre-rebase hook runs too late for that).
+    let wrap = f.temp.path().join("wrap");
+    fs::create_dir(&wrap).unwrap();
+    let marker = f.temp.path().join("edited");
+    let script = format!(
+        "#!/usr/bin/env python3\nimport os,sys,shutil,pathlib\nif 'rebase' in sys.argv[1:] and not pathlib.Path({marker:?}).exists():\n pathlib.Path({marker:?}).touch()\n pathlib.Path({edit:?}).write_text('EDIT BEFORE REBASE\\n')\nreal=shutil.which('git',path=os.pathsep.join(p for p in os.environ['PATH'].split(os.pathsep) if p!={wrap:?}))\nos.execv(real,[real,*sys.argv[1:]])\n",
+        marker = marker.to_str().unwrap(),
+        edit = f.a.join("shared.txt").to_str().unwrap(),
+        wrap = wrap.to_str().unwrap(),
+    );
+    fs::write(wrap.join("git"), script).unwrap();
+    fs::set_permissions(wrap.join("git"), fs::Permissions::from_mode(0o755)).unwrap();
+    let path = format!("{}:{}", wrap.display(), std::env::var("PATH").unwrap());
+    let child = spawn_sync_env(&f, "version=1\nbranch='main'", &[("PATH", path.as_ref())]);
+    let head = text(&f.a, &["rev-parse", "HEAD"]);
+    let remote = text(&f.origin, &["rev-parse", "main"]);
+    let report = finish_sync(child);
+    assert!(marker.exists());
+    assert_eq!(report.outcome, Outcome::Deferred, "{report:?}");
+    assert!(report.diagnostics.iter().any(|d| d.message == WAITING));
+    assert_eq!(text(&f.a, &["stash", "list"]), "", "{report:?}");
+    assert_eq!(text(&f.a, &["rev-parse", "HEAD"]), head, "{report:?}");
+    assert_eq!(
+        fs::read_to_string(f.a.join("shared.txt")).unwrap(),
+        "EDIT BEFORE REBASE\n"
+    );
+    assert!(!report.pushed);
+    assert_eq!(text(&f.origin, &["rev-parse", "main"]), remote);
+    assert!(!f.a.join(".git/rebase-merge").exists());
+    assert!(!f.a.join(".git/git-rsrs-integrate.json").exists());
 }
 
 #[test]

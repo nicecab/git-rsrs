@@ -211,24 +211,30 @@ fn sync_locked(
         }
     }
     let mut post_failed = false;
-    fetch_and_integrate(
+    if !fetch_and_integrate(
         &git,
         config,
         report,
         &context,
         &mut post_failed,
         &mut expected_head,
-    )?;
+    )? {
+        wait_for_clean_worktree(report, rejected);
+        return Ok(());
+    }
     if git.ahead(&config.remote, &config.branch)? {
         if git.push(&config.remote, &config.branch, &expected_head)? == PushResult::NonFastForward {
-            fetch_and_integrate(
+            if !fetch_and_integrate(
                 &git,
                 config,
                 report,
                 &context,
                 &mut post_failed,
                 &mut expected_head,
-            )?;
+            )? {
+                wait_for_clean_worktree(report, rejected);
+                return Ok(());
+            }
             if git.push(&config.remote, &config.branch, &expected_head)?
                 == PushResult::NonFastForward
             {
@@ -250,6 +256,20 @@ fn sync_locked(
     };
     Ok(())
 }
+/// The remote is ahead of a dirty worktree, which stays untouched until a
+/// later run finds it clean.
+fn wait_for_clean_worktree(report: &mut SyncReport, rejected: bool) {
+    report.outcome = if rejected {
+        Outcome::ValidationRejected
+    } else {
+        Outcome::Deferred
+    };
+    report.diagnostic(
+        "integrate",
+        "remote has new commits; integration waits for a clean worktree",
+    );
+}
+/// Returns `false` when integration waits for a clean worktree.
 fn fetch_and_integrate(
     git: &Git,
     config: &Config,
@@ -257,7 +277,7 @@ fn fetch_and_integrate(
     context: &HookContext,
     post_failed: &mut bool,
     expected_head: &mut String,
-) -> Result<(), Failure> {
+) -> Result<bool, Failure> {
     require_identity(git, config, expected_head)?;
     git.fetch(&config.remote, &config.branch)?;
     require_identity(git, config, expected_head)?;
@@ -269,9 +289,8 @@ fn fetch_and_integrate(
             require_identity(git, config, expected_head)?;
             report.integrated |= changed;
         }
-        Integration::RebaseConflict { recovery }
-        | Integration::StashRestoreConflict { recovery }
-        | Integration::RecoveryRequired { recovery } => {
+        Integration::DirtyWorktree => return Ok(false),
+        Integration::RebaseConflict { recovery } | Integration::RecoveryRequired { recovery } => {
             return Err(Failure {
                 outcome: Outcome::ManualIntervention,
                 message: "integration requires manual intervention".into(),
@@ -286,7 +305,8 @@ fn fetch_and_integrate(
     );
     *post_failed |= !hooks.diagnostics.is_empty();
     report.diagnostics.extend(hooks.diagnostics);
-    require_identity(git, config, expected_head)
+    require_identity(git, config, expected_head)?;
+    Ok(true)
 }
 
 fn require_identity(git: &Git, config: &Config, expected_head: &str) -> Result<(), Failure> {

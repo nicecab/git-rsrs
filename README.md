@@ -85,9 +85,19 @@ checkout. The lock name must be a plain, non-reserved `.lock` filename; Git's ow
 1. Acquire the checkout's advisory lock and verify its Git state and branch.
 2. Build a candidate snapshot in an alternate index and run validation hooks.
 3. Commit allowed local changes, including untracked files that Git does not ignore.
-4. Fetch the configured remote branch and rebase with Git autostash when needed.
+4. Fetch the configured remote branch and rebase onto it when needed, only on a
+   clean worktree; Git's own `rebase.autoStash` is overridden.
 5. Run post-integration checks, then push if local commits are ahead.
 6. Release the lock and invoke result-reporting hooks.
+
+Integration waits for a clean worktree. When an integration attempt finds
+uncommitted changes (a validation rejection, or an edit made after the commit)
+and the remote has new commits, it fetches but skips that rebase, its
+post-integration checks and any further push; the run ends as a validation
+rejection (exit 3) or deferred (exit 0) with the diagnostic "remote has new
+commits; integration waits for a clean worktree". On the retry after a rejected
+push, the first integration and its checks may already have completed. When the
+remote has no new commits, earlier local commits are still pushed.
 
 A successful validation authorizes the pinned candidate, not arbitrary later
 edits. If the working tree or index changes during validation, the run defers.
@@ -153,10 +163,11 @@ timeout = "5s"
 | `post_integrate` | Failures are recorded but do not prevent pushing existing commits. Runs after each successful integration/reconciliation, including a retry. |
 | `on_result` | Runs after lock release. Failures add diagnostics without replacing the finalized sync outcome. |
 
-Validation rejection still permits remote integration and pushing existing
-commits. Hook side effects are not rolled back. Mutating hooks are unsupported;
-trying to reacquire the same checkout lock from a validation hook would deadlock
-until the hook timeout.
+Validation rejection still permits pushing existing commits when the remote has
+no new commits; otherwise integration waits for a clean worktree. Hook side
+effects are not rolled back. Mutating hooks are unsupported; trying to reacquire
+the same checkout lock from a validation hook would deadlock until the hook
+timeout.
 
 Hook context:
 
@@ -194,15 +205,14 @@ A failed active rebase is retained for manual recovery rather than automatically
 aborted: abort can erase concurrent editor changes. Ignored local files are checked
 for collisions before integration, including paths touched by intermediate replayed
 commits; ignored directories are protected as units, so
-incoming tracked content beneath one also requires manual attention. A retained
-autostash requires intervention even when the index has no unmerged entries.
+incoming tracked content beneath one also requires manual attention.
 
 A fatal outcome takes precedence over validation rejection; reporting-hook failures
 never replace the primary result.
 
 | Exit | Meaning |
 | --- | --- |
-| 0 | Synced, no-op, branch skipped, or deferred pending quiet/revalidation |
+| 0 | Synced, no-op, branch skipped, or deferred pending quiet/revalidation or a clean worktree |
 | 1 | Unexpected error or authentication failure (distinct JSON outcomes) |
 | 2 | Usage or configuration error |
 | 3 | Validation rejection or post-integration check failure |
@@ -211,11 +221,7 @@ never replace the primary result.
 | 6 | Recognized network unavailability; local commits retained |
 | 7 | Command or hook timeout |
 
-Autostash preserves tracked uncommitted content but does not promise to preserve
-its original division between staged and unstaged changes. Untracked files are
-never removed to make room for remote content. A stash restoration conflict stops
-before push and retains recovery references. Inspect the report, `git status` and
-`git stash list`; identify the stash contents before applying or dropping anything.
+Untracked files are never removed to make room for remote content.
 
 Recovery journals are located with:
 
@@ -225,9 +231,9 @@ git rev-parse --git-path git-rsrs-integrate.json
 ```
 
 Their presence blocks new automatic mutations. Preserve each journal and its
-referenced files while comparing HEAD, the candidate tree, the original index,
-working-tree content and stash references. After interruption, rsrs conservatively
-requires manual inspection rather than guessing that it owns remaining Git state.
+referenced files while comparing HEAD, the candidate tree, the original index
+and working-tree content. After interruption, rsrs conservatively requires manual
+inspection rather than guessing that it owns remaining Git state.
 Remove recovery markers only after deliberate repair. Never remove `index.lock`
 while its owner is running. No recovery procedure should start with a hard reset
 or deletion of untracked content.
