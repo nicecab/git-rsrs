@@ -1,7 +1,7 @@
 use crate::{
     config::Config,
     git::{
-        COMMIT_JOURNAL, Git, GitError, INTEGRATE_JOURNAL, RepositoryState,
+        Git, GitError, RepositoryState,
         integrate::{Integration, PushResult},
         snapshot::{CommitResult, Snapshot},
     },
@@ -115,8 +115,11 @@ fn sync_locked(
     git.timeout = config.git_timeout;
     *checkout_root = git.root.clone();
     let _lock = CheckoutLock::acquire(&git, &config.lock_name, config.lock_timeout)?;
-    for marker in [COMMIT_JOURNAL, INTEGRATE_JOURNAL, "index.lock"] {
-        let path = git.path(marker)?;
+    for path in [
+        &git.paths.commit_journal,
+        &git.paths.integrate_journal,
+        &git.paths.index_lock,
+    ] {
         if path.exists() {
             return Err(Failure {
                 outcome: Outcome::ManualIntervention,

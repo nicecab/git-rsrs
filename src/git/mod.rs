@@ -31,10 +31,27 @@ pub enum GitError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
+/// Fixed Git paths, resolved once through `--git-path` so linked worktrees and
+/// the common directory keep Git's placement.
+#[derive(Debug, Clone, Default)]
+pub struct GitPaths {
+    pub index: PathBuf,
+    pub index_lock: PathBuf,
+    pub commit_journal: PathBuf,
+    pub integrate_journal: PathBuf,
+    pub merge_head: PathBuf,
+    pub rebase_merge: PathBuf,
+    pub rebase_apply: PathBuf,
+    pub cherry_pick_head: PathBuf,
+    pub revert_head: PathBuf,
+    pub bisect_start: PathBuf,
+    pub sequencer: PathBuf,
+}
 #[derive(Debug, Clone)]
 pub struct Git {
     pub root: PathBuf,
     pub git_dir: PathBuf,
+    pub paths: GitPaths,
     pub runner: ProcessRunner,
     pub timeout: Duration,
 }
@@ -44,11 +61,50 @@ impl Git {
         let mut git = Self {
             root: repo,
             git_dir: PathBuf::new(),
+            paths: GitPaths::default(),
             runner,
             timeout: Duration::from_secs(120),
         };
-        git.root = path_output(git.run(["rev-parse", "--show-toplevel"])?.stdout);
-        git.git_dir = git.path(".")?;
+        let (mut git_dir, mut paths) = (PathBuf::new(), GitPaths::default());
+        let mut slots = [
+            (".", &mut git_dir),
+            ("index", &mut paths.index),
+            ("index.lock", &mut paths.index_lock),
+            (COMMIT_JOURNAL, &mut paths.commit_journal),
+            (INTEGRATE_JOURNAL, &mut paths.integrate_journal),
+            ("MERGE_HEAD", &mut paths.merge_head),
+            ("rebase-merge", &mut paths.rebase_merge),
+            ("rebase-apply", &mut paths.rebase_apply),
+            ("CHERRY_PICK_HEAD", &mut paths.cherry_pick_head),
+            ("REVERT_HEAD", &mut paths.revert_head),
+            ("BISECT_START", &mut paths.bisect_start),
+            ("sequencer", &mut paths.sequencer),
+        ];
+        // One spawn prints the toplevel, then one line per `--git-path` name.
+        let mut args = vec!["rev-parse", "--show-toplevel", "--path-format=absolute"];
+        args.extend(slots.iter().flat_map(|(name, _)| ["--git-path", *name]));
+        let raw = git.run(args)?.stdout;
+        let lines: Vec<_> = raw
+            .strip_suffix(b"\n")
+            .unwrap_or(&raw)
+            .split(|b| *b == b'\n')
+            .collect();
+        let Some((root, resolved)) = lines
+            .split_first()
+            .filter(|(_, rest)| rest.len() == slots.len())
+        else {
+            return Err(GitError::Invalid(format!(
+                "expected {} lines of Git paths, got {}",
+                slots.len() + 1,
+                lines.len()
+            )));
+        };
+        for ((_, slot), line) in slots.iter_mut().zip(resolved) {
+            **slot = path_output(line.to_vec());
+        }
+        git.root = path_output(root.to_vec());
+        git.git_dir = git_dir;
+        git.paths = paths;
         Ok(git)
     }
     pub fn spec<I, S>(&self, args: I) -> CommandSpec
@@ -143,24 +199,15 @@ impl Git {
             .is_empty())
     }
     /// Durably creates a recovery journal, failing if one already exists.
-    pub fn write_journal(
-        &self,
-        name: &str,
-        contents: &serde_json::Value,
-    ) -> Result<PathBuf, GitError> {
-        let path = self.path(name)?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
+    pub fn write_journal(&self, path: &Path, contents: &serde_json::Value) -> Result<(), GitError> {
+        let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
         file.write_all(
             serde_json::to_string_pretty(contents)
                 .expect("journal metadata")
                 .as_bytes(),
         )?;
         file.sync_all()?;
-        self.sync_git_dir()?;
-        Ok(path)
+        self.sync_git_dir()
     }
     pub fn sync_git_dir(&self) -> Result<(), GitError> {
         Ok(File::open(&self.git_dir)?.sync_all()?)
@@ -201,19 +248,20 @@ pub enum RepositoryState {
 }
 impl Git {
     pub fn state(&self) -> Result<RepositoryState, GitError> {
+        let paths = &self.paths;
         for (marker, state) in [
-            ("MERGE_HEAD", RepositoryState::Merging),
-            ("rebase-merge", RepositoryState::Rebasing),
-            ("CHERRY_PICK_HEAD", RepositoryState::CherryPicking),
-            ("REVERT_HEAD", RepositoryState::Reverting),
-            ("BISECT_START", RepositoryState::Bisecting),
-            ("sequencer", RepositoryState::Sequencing),
+            (&paths.merge_head, RepositoryState::Merging),
+            (&paths.rebase_merge, RepositoryState::Rebasing),
+            (&paths.cherry_pick_head, RepositoryState::CherryPicking),
+            (&paths.revert_head, RepositoryState::Reverting),
+            (&paths.bisect_start, RepositoryState::Bisecting),
+            (&paths.sequencer, RepositoryState::Sequencing),
         ] {
-            if self.path(marker)?.exists() {
+            if marker.exists() {
                 return Ok(state);
             }
         }
-        let apply = self.path("rebase-apply")?;
+        let apply = &paths.rebase_apply;
         if apply.exists() {
             return Ok(if apply.join("rebasing").exists() {
                 RepositoryState::Rebasing

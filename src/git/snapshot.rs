@@ -1,4 +1,4 @@
-use super::{COMMIT_JOURNAL, Git, GitError};
+use super::{Git, GitError};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
@@ -31,7 +31,7 @@ impl Snapshot {
                 "unmerged index entries require manual resolution".into(),
             ));
         }
-        if git.path(COMMIT_JOURNAL)?.exists() {
+        if git.paths.commit_journal.exists() {
             return Err(GitError::Invalid(
                 "unfinished commit publication; inspect git-rsrs-commit.json before retrying"
                     .into(),
@@ -41,7 +41,7 @@ impl Snapshot {
             .prefix("git-rsrs-candidate-")
             .tempdir_in(&git.git_dir)?;
         let index = directory.path().join("index");
-        let original_index = read_optional(&git.path("index")?)?;
+        let original_index = read_optional(&git.paths.index)?;
         let head = git.head()?;
         let branch = git.branch()?;
         let env = index_env(&index);
@@ -64,7 +64,7 @@ impl Snapshot {
     fn base_unchanged(&self, git: &Git) -> Result<bool, GitError> {
         Ok(git.head()? == self.head
             && git.branch()? == self.branch
-            && read_optional(&git.path("index")?)? == self.original_index)
+            && read_optional(&git.paths.index)? == self.original_index)
     }
     pub fn unchanged(&self, git: &Git) -> Result<bool, GitError> {
         if !self.base_unchanged(git)? {
@@ -83,11 +83,11 @@ impl Snapshot {
         if git.text(["rev-parse", "HEAD^{tree}"])? == self.tree {
             return Ok(CommitResult::NoChanges);
         }
-        let lock_path = git.path("index.lock")?;
+        let lock_path = &git.paths.index_lock;
         let mut index_lock = OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(&lock_path)?;
+            .open(lock_path)?;
         if !self.base_unchanged(git)? {
             drop(index_lock);
             fs::remove_file(lock_path)?;
@@ -101,7 +101,8 @@ impl Snapshot {
             fs::File::open(&backup)?.sync_all()?;
         }
         let metadata = serde_json::json!({"version":1,"head":self.head,"branch":self.branch,"tree":self.tree,"candidate_index":self.index,"original_index":backup,"original_index_existed":self.original_index.is_some(),"directory":directory,"index_lock":lock_path});
-        let journal = git.write_journal(COMMIT_JOURNAL, &metadata)?;
+        let journal = &git.paths.commit_journal;
+        git.write_journal(journal, &metadata)?;
         let result = git.run_env(
             [
                 "-c",
@@ -126,8 +127,8 @@ impl Snapshot {
             if current_head == self.head {
                 // A native hook may have changed its alternate index; retain the live original.
                 drop(index_lock);
-                fs::remove_file(&lock_path)?;
-                fs::remove_file(&journal)?;
+                fs::remove_file(lock_path)?;
+                fs::remove_file(journal)?;
                 fs::remove_dir_all(directory)?;
                 return Err(error);
             }
@@ -145,7 +146,7 @@ impl Snapshot {
         index_lock.write_all(&fs::read(&self.index)?)?;
         index_lock.sync_all()?;
         drop(index_lock);
-        fs::rename(&lock_path, git.path("index")?)?;
+        fs::rename(lock_path, &git.paths.index)?;
         git.sync_git_dir()?;
         fs::remove_file(journal)?;
         fs::remove_dir_all(directory)?;
