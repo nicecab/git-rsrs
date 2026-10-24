@@ -1,6 +1,6 @@
 use crate::{
     config::Config,
-    git::{COMMIT_JOURNAL, Git, GitError, INTEGRATE_JOURNAL, RepositoryState, snapshot::Snapshot},
+    git::{Git, GitError, RepositoryState, snapshot::Snapshot},
     outcome::{Outcome, SyncReport, Trigger},
     process::{CANCELLED, ProcessRunner},
     scheduler::{RunRequest, Scheduler, SchedulerEvent},
@@ -214,8 +214,8 @@ impl Launcher<'_> {
         }
         let baseline = if request.trigger == Trigger::LocalChange
             && git.state()? == RepositoryState::Ready
-            && !git.path(COMMIT_JOURNAL)?.exists()
-            && !git.path(INTEGRATE_JOURNAL)?.exists()
+            && !git.paths.commit_journal.exists()
+            && !git.paths.integrate_journal.exists()
         {
             Some(Snapshot::capture(git)?)
         } else {

@@ -1,13 +1,16 @@
 mod common;
 use common::*;
 use git_rsrs::{
-    config::{Config, HookConfig},
-    outcome::{Outcome, Trigger},
+    config::HookConfig,
+    outcome::{Outcome, SyncReport, Trigger},
     sync::sync_once,
 };
 use std::{fs, time::Duration};
-fn setup(f: &Fixture, message: &str, sleep: bool) -> Config {
-    let c = f.config();
+// Runs through `spawn_sync` so the fake `core.sshCommand` from `setup` is used.
+fn ssh_sync(f: &Fixture, extra: &str) -> SyncReport {
+    finish_sync(spawn_sync(f, &format!("version=1\nbranch='main'\n{extra}")))
+}
+fn setup(f: &Fixture, message: &str, sleep: bool) {
     git(
         &f.a,
         ["remote", "set-url", "origin", "ssh://test.invalid/repo"],
@@ -29,14 +32,13 @@ fn setup(f: &Fixture, message: &str, sleep: bool) -> Config {
             &format!("python3 '{}'", script.display()),
         ],
     );
-    c
 }
 #[test]
 fn offline_failure_keeps_the_new_local_commit() {
     let f = Fixture::new();
-    let c = setup(&f, "Network is unreachable", false);
+    setup(&f, "Network is unreachable", false);
     fs::write(f.a.join("new"), "offline work").unwrap();
-    let report = sync_once(&c, Trigger::Manual);
+    let report = ssh_sync(&f, "");
     assert_eq!(report.outcome, Outcome::Offline, "{report:?}");
     assert!(report.committed.is_some());
     assert!(!report.pushed);
@@ -45,14 +47,13 @@ fn offline_failure_keeps_the_new_local_commit() {
 #[test]
 fn authentication_and_timeout_have_distinct_outcomes() {
     let f = Fixture::new();
-    let c = setup(&f, "Permission denied (publickey).", false);
+    setup(&f, "Permission denied (publickey).", false);
+    assert_eq!(ssh_sync(&f, "").outcome, Outcome::AuthenticationFailed);
+    setup(&f, "waiting", true);
     assert_eq!(
-        sync_once(&c, Trigger::Manual).outcome,
-        Outcome::AuthenticationFailed
+        ssh_sync(&f, "git_timeout='100ms'").outcome,
+        Outcome::TimedOut
     );
-    let mut c = setup(&f, "waiting", true);
-    c.git_timeout = Duration::from_millis(100);
-    assert_eq!(sync_once(&c, Trigger::Manual).outcome, Outcome::TimedOut);
 }
 #[test]
 fn result_hook_failure_does_not_replace_success() {

@@ -1,4 +1,4 @@
-use super::{Git, GitError, INTEGRATE_JOURNAL, nul_paths};
+use super::{Git, GitError, nul_paths};
 use std::{fs, path::PathBuf};
 
 #[derive(Debug)]
@@ -77,7 +77,8 @@ impl Git {
         let target_oid = self.text(["rev-parse", &target])?;
         let before = self.text(["stash", "list", "--format=%H"])?;
         let metadata = serde_json::json!({"version":1,"head":original_head,"target":target,"target_oid":target_oid,"stash_before":before.lines().collect::<Vec<_>>()});
-        let journal = self.write_journal(INTEGRATE_JOURNAL, &metadata)?;
+        let journal = &self.paths.integrate_journal;
+        self.write_journal(journal, &metadata)?;
         let result = self.run([
             "-c",
             "commit.gpgsign=false",
@@ -85,7 +86,7 @@ impl Git {
             "--autostash",
             &target,
         ]);
-        let active = self.path("rebase-merge")?.exists() || self.path("rebase-apply")?.exists();
+        let active = self.paths.rebase_merge.exists() || self.paths.rebase_apply.exists();
         if result.is_err() && active {
             // Abort can hard-reset edits made by a concurrent editor. Retain the
             // operation instead of asserting that matching refs prove preservation.
@@ -93,8 +94,8 @@ impl Git {
                 "active rebase retained to preserve concurrent edits; inspect {}",
                 journal.display()
             )];
-            for marker in ["rebase-merge/autostash", "rebase-apply/autostash"] {
-                if let Ok(id) = fs::read_to_string(self.path(marker)?) {
+            for dir in [&self.paths.rebase_merge, &self.paths.rebase_apply] {
+                if let Ok(id) = fs::read_to_string(dir.join("autostash")) {
                     recovery.push(format!("retained autostash object {}", id.trim()));
                 }
             }

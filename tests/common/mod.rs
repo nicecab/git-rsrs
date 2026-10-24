@@ -157,6 +157,9 @@ pub fn barrier_hook(f: &Fixture, name: &str) -> Barrier {
     );
     barrier
 }
+/// Runs `git-rsrs sync` in a child process. The caller's `GIT_SSH_COMMAND` /
+/// `GIT_SSH` are removed from the child so a repo-local `core.sshCommand`
+/// fixture takes effect; they would otherwise override it.
 pub fn spawn_sync(f: &Fixture, config: &str) -> std::process::Child {
     let cfg = f.temp.path().join("async-sync.toml");
     fs::write(&cfg, config).unwrap();
@@ -166,6 +169,8 @@ pub fn spawn_sync(f: &Fixture, config: &str) -> std::process::Child {
         .arg("--config")
         .arg(cfg)
         .args(["--json", "sync"])
+        .env_remove("GIT_SSH_COMMAND")
+        .env_remove("GIT_SSH")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .spawn()
