@@ -76,22 +76,26 @@ impl Snapshot {
         }
         Ok(git.text_env(["write-tree"], &index_env(&self.index))? == self.tree)
     }
-    pub fn commit_validated(self, git: &Git) -> Result<CommitResult, GitError> {
+    /// Returns the result that ends publication before `git commit`, if any.
+    fn early_result(&self, git: &Git) -> Result<Option<CommitResult>, GitError> {
         if !self.unchanged(git)? {
-            return Ok(CommitResult::DeferredConcurrentChange);
+            return Ok(Some(CommitResult::DeferredConcurrentChange));
         }
         if git.text(["rev-parse", "HEAD^{tree}"])? == self.tree {
-            return Ok(CommitResult::NoChanges);
+            return Ok(Some(CommitResult::NoChanges));
         }
+        Ok(None)
+    }
+    pub fn commit_validated(self, git: &Git) -> Result<CommitResult, GitError> {
         let lock_path = &git.paths.index_lock;
         let mut index_lock = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(lock_path)?;
-        if !self.base_unchanged(git)? {
+        if let Some(result) = self.early_result(git).transpose() {
             drop(index_lock);
             fs::remove_file(lock_path)?;
-            return Ok(CommitResult::DeferredConcurrentChange);
+            return result;
         }
         // Pin all recovery data before the command is allowed to update HEAD.
         let directory = self.directory.keep();

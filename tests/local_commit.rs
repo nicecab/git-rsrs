@@ -221,3 +221,45 @@ fn killed_commit_retains_a_journal_and_original_index_for_manual_recovery() {
     assert!(g.path("git-rsrs-commit.json").unwrap().exists());
     assert!(Snapshot::capture(&g).is_err());
 }
+
+#[test]
+fn capture_and_validation_work_while_the_real_index_lock_is_held() {
+    let f = Fixture::new();
+    let g = Git::open(&f.a, ProcessRunner).unwrap();
+    fs::write(f.a.join("shared.txt"), "candidate").unwrap();
+    let lock = g.path("index.lock").unwrap();
+    fs::write(&lock, "").unwrap();
+    let snapshot = Snapshot::capture(&g).unwrap();
+    assert!(snapshot.unchanged(&g).unwrap());
+}
+
+#[test]
+fn no_change_and_deferred_results_release_the_index_lock() {
+    let f = Fixture::new();
+    let g = Git::open(&f.a, ProcessRunner).unwrap();
+    let lock = g.path("index.lock").unwrap();
+    assert!(matches!(
+        Snapshot::capture(&g).unwrap().commit_validated(&g).unwrap(),
+        CommitResult::NoChanges
+    ));
+    assert!(!lock.exists());
+    fs::write(f.a.join("shared.txt"), "candidate").unwrap();
+    let snapshot = Snapshot::capture(&g).unwrap();
+    fs::write(f.a.join("shared.txt"), "later").unwrap();
+    assert!(matches!(
+        snapshot.commit_validated(&g).unwrap(),
+        CommitResult::DeferredConcurrentChange
+    ));
+    assert!(!lock.exists());
+}
+
+#[test]
+fn validation_error_releases_the_index_lock() {
+    let f = Fixture::new();
+    let g = Git::open(&f.a, ProcessRunner).unwrap();
+    fs::write(f.a.join("shared.txt"), "candidate").unwrap();
+    let snapshot = Snapshot::capture(&g).unwrap();
+    fs::write(g.path("git-rsrs-commit.json").unwrap(), "{}").unwrap();
+    assert!(snapshot.commit_validated(&g).is_err());
+    assert!(!g.path("index.lock").unwrap().exists());
+}

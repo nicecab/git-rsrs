@@ -1,6 +1,11 @@
 mod common;
 use common::*;
-use git_rsrs::{git::Git, outcome::SyncReport, process::ProcessRunner, watch::event_relevant};
+use git_rsrs::{
+    git::Git,
+    outcome::{Outcome, SyncReport, Trigger},
+    process::ProcessRunner,
+    watch::event_relevant,
+};
 use std::{
     fs,
     io::{BufRead, BufReader},
@@ -171,4 +176,30 @@ fn review_edits_during_lock_wait_must_receive_a_new_quiet_period() {
         last.elapsed()
     );
     assert_eq!(text(&f.origin, &["show", "main:new"]), "LAST EDIT");
+}
+
+#[test]
+fn capture_error_in_a_local_change_run_is_reported_as_a_failure_not_deferred() {
+    let f = Fixture::new();
+    // A failing required clean filter on an untracked path keeps the tree dirty
+    // (status does not filter untracked files) but makes `git add -A` fail.
+    fs::write(
+        f.a.join(".git/info/attributes"),
+        "unfilterable filter=broken\n",
+    )
+    .unwrap();
+    git(&f.a, ["config", "filter.broken.clean", "false"]);
+    git(&f.a, ["config", "filter.broken.required", "true"]);
+    fs::write(f.a.join("unfilterable"), "content").unwrap();
+    let watcher = WatchChild::start(&f, "200ms", "1h");
+    let report = watcher.reports.recv_timeout(PHASE_TIMEOUT).unwrap();
+    assert_eq!(report.trigger, Trigger::LocalChange);
+    assert_eq!(report.outcome, Outcome::Failed, "{report:?}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("filter 'broken' failed")),
+        "{report:?}"
+    );
 }
