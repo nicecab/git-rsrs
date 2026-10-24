@@ -289,6 +289,16 @@ Tests and optimized binary startup run on Linux musl, Apple Silicon macOS and
 Intel macOS. RustSec dependency audits run on dependency changes, weekly, and
 before release publication. GitHub Actions dependencies are pinned to
 full commit SHAs with version comments. The release workflow tests and packages
-all three supported targets and publishes archives/checksums only when a maintainer
-explicitly pushes a `v<package-version>` tag. No service activation, consumer
-migration or tag publication is part of an ordinary build.
+all three supported targets and publishes archives/checksums when a maintainer
+runs **Actions → Release → Run workflow** on `main`, specifying the exact package
+version (for example, `0.1.1`). First merge the version change in `Cargo.toml` and
+`Cargo.lock` into `main`. The workflow pins that commit, validates the version,
+builds/tests all targets and audits dependencies before creating the tag and
+publishing the release in the same run. No personal access token is required.
+
+An explicit push of a matching `v<package-version>` tag also starts the release
+workflow. Manual runs create tags only after verification; a failed publication
+can be rerun for the same commit. Existing tags are never moved or overwritten.
+The Homebrew tap independently detects the published release on its hourly schedule.
+
+No service activation, consumer migration or tag publication is part of an ordinary build.

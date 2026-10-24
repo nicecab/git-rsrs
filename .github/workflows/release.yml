@@ -2,10 +2,58 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version already merged into main (for example, 0.1.1)'
+        required: true
+        type: string
 permissions:
   contents: read
+concurrency:
+  group: release
+  cancel-in-progress: false
 jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate release source and version
+        id: release
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REF: ${{ github.ref }}
+        run: |
+          python3 - <<'PYTHON'
+          import os
+          import re
+          import subprocess
+          import tomllib
+
+          version = tomllib.loads(open("Cargo.toml").read())["package"]["version"]
+          if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version):
+              raise SystemExit("Only stable MAJOR.MINOR.PATCH versions can be released")
+          tag = f"v{version}"
+          if os.environ["EVENT_NAME"] == "workflow_dispatch":
+              if os.environ["REF"] != "refs/heads/main":
+                  raise SystemExit("Run manual releases from main")
+              if os.environ["REQUESTED_VERSION"] != version:
+                  raise SystemExit("Requested version must match Cargo.toml on main")
+          elif os.environ["REF_NAME"] != tag:
+              raise SystemExit("Release tag must match Cargo.toml")
+          sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"tag={tag}\nsha={sha}\n")
+          PYTHON
+
   build:
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -20,6 +68,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
       - name: Install pinned toolchain
         run: |
           rustup show
@@ -36,7 +86,7 @@ jobs:
           shared-key: release-${{ matrix.target }}
       - name: Verify tag matches package version
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
           test "$RELEASE_TAG" = "v$version"
@@ -46,7 +96,7 @@ jobs:
       - run: cargo build --locked --release --target ${{ matrix.target }}
       - name: Package binary
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
           TARGET: ${{ matrix.target }}
         run: |
           mkdir -p dist/package/examples
@@ -64,7 +114,7 @@ jobs:
             dist/*.sha256
           if-no-files-found: error
   publish:
-    needs: [build, audit]
+    needs: [prepare, build, audit]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -73,19 +123,37 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Create release tag for manual runs
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          # A rerun may find the tag created by an earlier failed publish step.
+          if existing=$(gh api "repos/$GH_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object.sha'); then
+            test "$existing" = "$RELEASE_SHA"
+          else
+            gh api --method POST "repos/$GH_REPO/git/refs" \
+              -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$RELEASE_SHA"
+          fi
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: gh release create "$RELEASE_TAG" --verify-tag --generate-notes dist/*.tar.gz dist/*.sha256
 
   audit:
     name: Audit release dependencies
+    needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
       - uses: taiki-e/install-action@a4d3f3f761dcd95cce1b72cb61cb6d1963438177 # v2
         with:
           tool: cargo-audit@0.22.2
