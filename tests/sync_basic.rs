@@ -2,7 +2,7 @@ mod common;
 use common::*;
 use git_rsrs::{
     outcome::{Outcome, Trigger},
-    sync::sync_once,
+    sync::{sync_once, sync_once_guarded},
 };
 use std::fs;
 
@@ -89,8 +89,21 @@ fn periodic_run_discovering_new_local_edits_defers_instead_of_committing() {
     let c = f.config();
     let head = text(&f.a, &["rev-parse", "HEAD"]);
     fs::write(f.a.join("new"), "just saved").unwrap();
-    let report = sync_once(&c, Trigger::Periodic);
+    let commit_local = false;
+    let report = sync_once_guarded(&c, Trigger::Periodic, commit_local, || true);
     assert_eq!(report.outcome, Outcome::Deferred);
     assert!(report.committed.is_none());
     assert_eq!(text(&f.a, &["rev-parse", "HEAD"]), head);
+}
+
+#[test]
+fn periodic_trigger_commits_a_dirty_tree_when_commit_local_is_set() {
+    let f = Fixture::new();
+    let c = f.config();
+    fs::write(f.a.join("new"), "just saved").unwrap();
+    let commit_local = true;
+    let report = sync_once_guarded(&c, Trigger::Periodic, commit_local, || true);
+    assert_eq!(report.outcome, Outcome::Synced, "{report:?}");
+    assert!(report.committed.is_some());
+    assert_eq!(text(&f.origin, &["show", "main:new"]), "just saved");
 }

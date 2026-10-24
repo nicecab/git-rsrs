@@ -39,6 +39,13 @@ impl Scheduler {
             shutdown: false,
         }
     }
+    /// Clears the in-flight request and keeps local work pending for another quiet
+    /// period, whether the run was deferred or never started. The generation is
+    /// left alone: deferring is not an edit.
+    pub fn defer_local(&mut self, now: Instant) {
+        self.in_flight = None;
+        self.last_change = Some(now);
+    }
     pub fn on_event(&mut self, event: SchedulerEvent, now: Instant) -> Option<RunRequest> {
         match event {
             SchedulerEvent::LocalChange => {
@@ -58,7 +65,7 @@ impl Scheduler {
                     self.last_change = None;
                 }
                 if outcome == Outcome::Deferred {
-                    self.last_change = Some(now);
+                    self.defer_local(now);
                 }
                 if outcome == Outcome::ManualIntervention {
                     self.paused = true;

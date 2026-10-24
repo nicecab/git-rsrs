@@ -1,6 +1,6 @@
 use crate::{
     config::Config,
-    git::{Git, GitError, RepositoryState, snapshot::Snapshot},
+    git::{Git, GitError},
     outcome::{Outcome, SyncReport, Trigger},
     process::{CANCELLED, ProcessRunner},
     scheduler::{RunRequest, Scheduler, SchedulerEvent},
@@ -204,35 +204,20 @@ impl Launcher<'_> {
         request: RunRequest,
     ) -> Result<(), WatchError> {
         let git = self.git;
+        let commit_local = request.trigger == Trigger::LocalChange;
         // Reconcile status before a periodic/initial run: native watcher delivery can lag.
-        if request.trigger != Trigger::LocalChange && git.is_dirty()? {
-            scheduler.on_event(
-                SchedulerEvent::RunFinished(Outcome::Deferred),
-                Instant::now(),
-            );
+        if !commit_local && git.is_dirty()? {
+            scheduler.defer_local(Instant::now());
             return Ok(());
         }
-        let baseline = if request.trigger == Trigger::LocalChange
-            && git.state()? == RepositoryState::Ready
-            && !git.paths.commit_journal.exists()
-            && !git.paths.integrate_journal.exists()
-        {
-            Some(Snapshot::capture(git)?)
-        } else {
-            None
-        };
         let changes = self.changes.clone();
         let generation = changes.load(Ordering::Relaxed);
-        let observed_git = git.clone();
         let config = self.config.clone();
         let tx = self.tx.clone();
         debug_assert!(worker.is_none());
         *worker = Some(thread::spawn(move || {
-            let report = sync_once_guarded(&config, request.trigger, || {
+            let report = sync_once_guarded(&config, request.trigger, commit_local, || {
                 changes.load(Ordering::Relaxed) == generation
-                    && baseline
-                        .as_ref()
-                        .is_none_or(|snapshot| snapshot.unchanged(&observed_git).unwrap_or(false))
             });
             let _ = tx.send(report);
         }));

@@ -134,3 +134,45 @@ fn recovery_pause_shutdown_and_deferred_runs_do_not_start_early() {
             .is_none()
     );
 }
+#[test]
+fn deferred_request_clears_in_flight_and_waits_a_full_quiet_period_from_the_defer() {
+    let t = Instant::now();
+    let mut s = Scheduler::new(seconds(30), seconds(5), t, false);
+    assert_eq!(
+        s.on_event(SchedulerEvent::PeriodicTick, t).unwrap().trigger,
+        Trigger::Initial
+    );
+    s.defer_local(t + seconds(1));
+    assert!(
+        s.on_event(SchedulerEvent::PeriodicTick, t + seconds(30))
+            .is_none()
+    );
+    assert_eq!(
+        s.on_event(SchedulerEvent::PeriodicTick, t + seconds(31))
+            .unwrap()
+            .trigger,
+        Trigger::LocalChange
+    );
+}
+#[test]
+fn successful_local_run_after_a_defer_clears_pending_work() {
+    let t = Instant::now();
+    let mut s = Scheduler::new(seconds(30), seconds(5), t, false);
+    s.on_event(SchedulerEvent::PeriodicTick, t).unwrap();
+    s.defer_local(t + seconds(1));
+    s.on_event(SchedulerEvent::PeriodicTick, t + seconds(31))
+        .unwrap();
+    assert!(
+        s.on_event(
+            SchedulerEvent::RunFinished(Outcome::Synced),
+            t + seconds(32)
+        )
+        .is_none()
+    );
+    assert_eq!(
+        s.on_event(SchedulerEvent::PeriodicTick, t + seconds(40))
+            .unwrap()
+            .trigger,
+        Trigger::Periodic
+    );
+}

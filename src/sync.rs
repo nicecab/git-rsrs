@@ -83,17 +83,26 @@ fn manual(message: impl Into<String>) -> Failure {
 }
 
 pub fn sync_once(config: &Config, trigger: Trigger) -> SyncReport {
-    sync_once_guarded(config, trigger, || true)
+    sync_once_guarded(config, trigger, true, || true)
 }
 
+/// `commit_local` says whether a dirty tree may be committed; when it is false
+/// a dirty tree found under the checkout lock defers the run instead.
 pub fn sync_once_guarded(
     config: &Config,
     trigger: Trigger,
+    commit_local: bool,
     fresh: impl Fn() -> bool,
 ) -> SyncReport {
     let mut report = SyncReport::new(trigger);
     let mut checkout_root = config.repo.clone();
-    if let Err(failure) = sync_locked(config, &mut report, &mut checkout_root, &fresh) {
+    if let Err(failure) = sync_locked(
+        config,
+        &mut report,
+        &mut checkout_root,
+        commit_local,
+        &fresh,
+    ) {
         report.outcome = failure.outcome;
         report.diagnostic("sync", failure.message);
         report.recovery.extend(failure.recovery);
@@ -109,6 +118,7 @@ fn sync_locked(
     config: &Config,
     report: &mut SyncReport,
     checkout_root: &mut std::path::PathBuf,
+    commit_local: bool,
     fresh: &dyn Fn() -> bool,
 ) -> Result<(), Failure> {
     let mut git = Git::open(&config.repo, ProcessRunner)?;
@@ -146,7 +156,7 @@ fn sync_locked(
     let context = HookContext::new(&git.root, report.trigger);
     let mut rejected = false;
     if git.is_dirty()? {
-        if matches!(report.trigger, Trigger::Initial | Trigger::Periodic) {
+        if !commit_local {
             report.outcome = Outcome::Deferred;
             return Ok(());
         }
