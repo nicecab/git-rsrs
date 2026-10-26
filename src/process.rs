@@ -3,7 +3,7 @@ use std::{
     ffi::{OsStr, OsString},
     io::{self, Read},
     os::{
-        fd::AsRawFd,
+        fd::{AsRawFd, RawFd},
         unix::process::{CommandExt, ExitStatusExt},
     },
     path::{Path, PathBuf},
@@ -15,6 +15,12 @@ use std::{
 use thiserror::Error;
 
 pub static CANCELLED: AtomicBool = AtomicBool::new(false);
+// Cancellation may be signalled on another thread without interrupting poll.
+const CANCEL_CHECK: Duration = Duration::from_millis(50);
+// Child exit is not pollable, so once both pipes close it is checked with a backoff
+// that starts short because the exit usually follows immediately.
+const EXIT_CHECK: Duration = Duration::from_millis(1);
+const TERM_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 pub struct CommandSpec {
@@ -107,6 +113,33 @@ fn drain(
     Ok(false)
 }
 
+fn wait_readable(fds: &[RawFd], timeout: Duration) -> io::Result<()> {
+    if fds.is_empty() {
+        thread::sleep(timeout);
+        return Ok(());
+    }
+    let mut pollfds: Vec<libc::pollfd> = fds
+        .iter()
+        .map(|&fd| libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+    let millis = timeout
+        .as_micros()
+        .div_ceil(1000)
+        .min(libc::c_int::MAX as u128) as libc::c_int;
+    // The descriptors belong to the pipes, which remain open throughout this call.
+    if unsafe { libc::poll(pollfds.as_mut_ptr(), pollfds.len() as libc::nfds_t, millis) } < 0 {
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
 impl ProcessRunner {
     pub fn run(&self, spec: &CommandSpec) -> Result<CommandOutput, ProcessError> {
         if CANCELLED.load(Ordering::Relaxed) {
@@ -154,6 +187,7 @@ impl ProcessRunner {
         let mut status = None;
         let (mut out_done, mut err_done) = (false, false);
         let mut terminating: Option<(Instant, bool)> = None;
+        let mut exit_check = EXIT_CHECK;
         loop {
             if !out_done {
                 out_done = drain(
@@ -185,7 +219,7 @@ impl ProcessRunner {
             }
             if let Some((started, interrupted)) = terminating {
                 // Do not stop cleanup merely because the group leader has exited.
-                if started.elapsed() >= Duration::from_secs(1) {
+                if started.elapsed() >= TERM_GRACE {
                     unsafe {
                         libc::kill(-(child.0.id() as i32), libc::SIGKILL);
                     }
@@ -205,7 +239,25 @@ impl ProcessRunner {
                 output.signal = status.and_then(|s| s.signal());
                 return Ok(output);
             }
-            thread::sleep(Duration::from_millis(5));
+            let limit = terminating.map_or(deadline, |(started, _)| started + TERM_GRACE);
+            let open: Vec<RawFd> = [
+                (out_done, stdout.as_raw_fd()),
+                (err_done, stderr.as_raw_fd()),
+            ]
+            .into_iter()
+            .filter_map(|(done, fd)| (!done).then_some(fd))
+            .collect();
+            let check = if open.is_empty() {
+                let check = exit_check;
+                exit_check = (exit_check * 2).min(CANCEL_CHECK);
+                check
+            } else {
+                CANCEL_CHECK
+            };
+            wait_readable(
+                &open,
+                limit.saturating_duration_since(Instant::now()).min(check),
+            )?;
         }
     }
 }

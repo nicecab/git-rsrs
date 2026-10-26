@@ -92,3 +92,15 @@ fn preserves_signals_and_spawn_errors() {
     assert!(matches!(result, Err(ProcessError::Io(_))));
     assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 0);
 }
+
+#[test]
+#[ignore = "timing benchmark; run with --ignored --nocapture"]
+fn bench_short_git_commands() {
+    let cwd = std::env::current_dir().unwrap();
+    let spec = CommandSpec::new(["git", "rev-parse", "HEAD"], cwd, Duration::from_secs(5));
+    let start = Instant::now();
+    for _ in 0..200 {
+        assert_eq!(ProcessRunner.run(&spec).unwrap().code, Some(0));
+    }
+    eprintln!("200 x git rev-parse HEAD: {:?}", start.elapsed());
+}
