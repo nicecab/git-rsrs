@@ -73,6 +73,47 @@ repositories. Do not select different lock names for processes mutating the same
 checkout. The lock name must be a plain, non-reserved `.lock` filename; Git's own
 `index.lock`, `HEAD.lock`, `config.lock` and other reserved lock names are rejected.
 
+## Status file
+
+Set `status_file` to an absolute path to let an external monitor judge health
+without reading logs:
+
+```toml
+status_file = "/Users/me/Library/Application Support/monitor/repo/status.json"
+```
+
+After every attempt, from both `sync` and `watch`, git-rsrs replaces this JSON
+file atomically. It is written last, after `on_result` hooks, so it reflects
+their failures too. A sibling `<status_file>.lock` serializes concurrent
+writers, so no counter update is lost. If the file cannot be written, git-rsrs
+prints one stderr line and keeps the sync outcome and exit code unchanged; the
+directory must already exist.
+
+| Field | Meaning |
+|---|---|
+| `version` | Status schema version, currently `1` |
+| `last_attempt_at` | RFC 3339 time of the latest attempt |
+| `last_outcome` | Latest outcome, same vocabulary as `RSRS_OUTCOME` |
+| `last_success_at` | Time of the latest `synced` or `noop`, or `null` |
+| `message` | First line of the latest sync diagnostic, or `null` |
+| `pid`, `git_rsrs_version` | Writer process and version |
+| `hook_failures` | Hooks that failed or timed out in the latest attempt: `phase`, `timed_out`, `message`. Pre-commit rejections are not failures. |
+| `counters_since` | RFC 3339 time the counters started. It changes only when they restart, so a consumer must discard anything keyed on an earlier `attempt_seq` when it changes. |
+| `attempt_seq` | Number of counted attempts since `counters_since` |
+| `consecutive_failures`, `consecutive_successes` | Counted attempts in a row that were unhealthy / healthy |
+| `recent` | Last 10 counted attempts, newest first, as `{seq, healthy}` |
+
+An attempt is healthy when its outcome is `synced` or `noop` and no hook failed.
+It is unhealthy when its outcome is `failed`, `timed_out`,
+`authentication_failed`, `check_failed` or `manual_intervention`, or any hook
+failed. `branch_skipped`, `offline`, `deferred`, `lock_timeout` and
+`validation_rejected` are not counted: they update `last_attempt_at` and
+`last_outcome` but leave `attempt_seq`, the counters and `recent` unchanged. A
+missing or unparsable previous file starts the counters afresh with a new
+`counters_since`; any other read error is reported as a write failure and the
+file is left as it was. An attempt cut short by SIGINT or SIGTERM is not
+recorded, because it says nothing about the repository's health.
+
 ## Synchronization
 
 1. Acquire the checkout's advisory lock and verify its Git state and branch.
