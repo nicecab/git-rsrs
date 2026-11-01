@@ -315,6 +315,10 @@ WantedBy=default.target
 
 ## Development and releases
 
+Install [mise](https://mise.jdx.dev/) and run `mise install` to install the Rust
+toolchain specified in `rust-toolchain.toml`. Use `mise exec --` to run commands
+with that toolchain, or activate mise in your shell.
+
 ```sh
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
@@ -327,8 +331,11 @@ Python 3 is used by interoperability and child-process fixtures. CI separates
 formatting, clippy/documentation checks and platform tests, with Rust build caches.
 Tests and optimized binary startup run on Linux musl, Apple Silicon macOS and
 Intel macOS. RustSec dependency audits run on dependency changes, weekly, and
-before release publication. GitHub Actions dependencies are pinned to
-full commit SHAs with version comments. The release workflow tests and packages
+before release publication. GitHub Actions dependencies are pinned in
+the dependency lockfile. After changing workflow actions, run `gh actions-lock`
+(using the [GitHub CLI extension](https://github.com/github/gh-actions-lock))
+and commit the updated lockfile. Renovate proposes dependency updates.
+The release workflow tests and packages
 all three supported targets and publishes archives/checksums when a maintainer
 runs **Actions → Release → Run workflow** on `main`, specifying the exact package
 version (for example, `0.1.1`). First merge the version change in `Cargo.toml` and
