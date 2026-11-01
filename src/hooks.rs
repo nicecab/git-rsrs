@@ -1,7 +1,7 @@
 use crate::{
     config::HookConfig,
     git::snapshot::index_env,
-    outcome::{Diagnostic, SyncReport, Trigger},
+    outcome::{Diagnostic, HookFailure, SyncReport, Trigger},
     process::{CommandSpec, ProcessError, ProcessRunner},
 };
 use std::path::{Path, PathBuf};
@@ -31,6 +31,7 @@ pub enum HookDecision {
 pub struct HookReport {
     pub decision: HookDecision,
     pub diagnostics: Vec<Diagnostic>,
+    pub failures: Vec<HookFailure>,
     pub timed_out: bool,
     pub interrupted: bool,
 }
@@ -58,6 +59,7 @@ impl HookRunner {
         let mut result = HookReport {
             decision: HookDecision::Allow,
             diagnostics: vec![],
+            failures: vec![],
             timed_out: false,
             interrupted: false,
         };
@@ -81,6 +83,7 @@ impl HookRunner {
                 }
                 spec.env.insert("RSRS_REPORT_JSON".into(), metadata.into());
             }
+            let mut timed_out = false;
             let (code, message) = match ProcessRunner.run(&spec) {
                 Ok(output) => {
                     let message = format!(
@@ -98,13 +101,23 @@ impl HookRunner {
                     (output.code, message)
                 }
                 Err(error) => {
-                    result.timed_out |= matches!(error, ProcessError::Timeout(_));
+                    timed_out = matches!(error, ProcessError::Timeout(_));
+                    result.timed_out |= timed_out;
                     result.interrupted |= matches!(error, ProcessError::Interrupted(_));
                     (None, error.to_string())
                 }
             };
             if code == Some(0) {
                 continue;
+            }
+            let rejected = phase == HookPhase::PreCommit
+                && code.is_some_and(|c| hook.reject_exit_codes.contains(&c));
+            if !rejected {
+                result.failures.push(HookFailure {
+                    phase: phase.as_str().into(),
+                    timed_out,
+                    message: message.lines().next().unwrap_or_default().trim().into(),
+                });
             }
             result.diagnostics.push(Diagnostic {
                 phase: phase.as_str().into(),

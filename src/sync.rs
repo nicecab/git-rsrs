@@ -112,6 +112,7 @@ pub fn sync_once_guarded(
     context.report = Some(report.clone());
     let hooks = HookRunner.run(HookPhase::OnResult, &config.hooks.on_result, &context);
     report.diagnostics.extend(hooks.diagnostics);
+    report.hook_failures.extend(hooks.failures);
     report
 }
 fn sync_locked(
@@ -169,6 +170,7 @@ fn sync_locked(
             &validation_context,
         );
         report.diagnostics.extend(checks.diagnostics);
+        report.hook_failures.extend(checks.failures);
         match checks.decision {
             HookDecision::AbortSync => {
                 return Err(Failure {
@@ -305,6 +307,7 @@ fn fetch_and_integrate(
     );
     *post_failed |= !hooks.diagnostics.is_empty();
     report.diagnostics.extend(hooks.diagnostics);
+    report.hook_failures.extend(hooks.failures);
     require_identity(git, config, expected_head)?;
     Ok(true)
 }

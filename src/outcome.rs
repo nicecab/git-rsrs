@@ -70,6 +70,13 @@ pub struct Diagnostic {
     pub phase: String,
     pub message: String,
 }
+/// A hook that failed or timed out. Intentional pre-commit rejections are not failures.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HookFailure {
+    pub phase: String,
+    pub timed_out: bool,
+    pub message: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncReport {
     pub version: u32,
@@ -80,6 +87,8 @@ pub struct SyncReport {
     pub pushed: bool,
     pub diagnostics: Vec<Diagnostic>,
     pub recovery: Vec<String>,
+    #[serde(default)]
+    pub hook_failures: Vec<HookFailure>,
 }
 impl SyncReport {
     pub fn new(trigger: Trigger) -> Self {
@@ -92,6 +101,7 @@ impl SyncReport {
             pushed: false,
             diagnostics: vec![],
             recovery: vec![],
+            hook_failures: vec![],
         }
     }
     pub fn diagnostic(&mut self, phase: &str, message: impl Into<String>) {

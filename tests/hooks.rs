@@ -64,3 +64,26 @@ fn hook_arguments_and_context_are_literal() {
     assert_eq!(result.decision, HookDecision::Allow);
     assert!(result.diagnostics.is_empty());
 }
+#[test]
+fn rejections_are_not_hook_failures() {
+    let temp = tempfile::tempdir().unwrap();
+    let context = HookContext::new(temp.path(), Trigger::Manual);
+    let result = HookRunner.run(HookPhase::PreCommit, &[hook(3, vec![3])], &context);
+    assert_eq!(result.decision, HookDecision::RejectCommit);
+    assert!(result.failures.is_empty());
+}
+#[test]
+fn failures_and_timeouts_are_structured() {
+    let temp = tempfile::tempdir().unwrap();
+    let context = HookContext::new(temp.path(), Trigger::Manual);
+    let result = HookRunner.run(HookPhase::PostIntegrate, &[hook(1, vec![])], &context);
+    assert_eq!(result.failures.len(), 1);
+    assert_eq!(result.failures[0].phase, "post_integrate");
+    assert!(!result.failures[0].timed_out);
+    let mut slow = hook(0, vec![]);
+    slow.command = vec!["sleep".into(), "5".into()];
+    slow.timeout = Duration::from_millis(100);
+    let result = HookRunner.run(HookPhase::PreCommit, &[slow], &context);
+    assert!(result.failures[0].timed_out);
+    assert!(!result.failures[0].message.contains('\n'));
+}
