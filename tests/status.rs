@@ -1,6 +1,6 @@
 use git_rsrs::{
     outcome::{HookFailure, Outcome, SyncReport, Trigger},
-    status::{RECENT_LEN, RecentAttempt, Status, next},
+    status::{RECENT_LEN, RecentAttempt, Status, next, record},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -125,4 +125,43 @@ fn message_is_first_sync_diagnostic() {
     failed.diagnostic("sync", "boom\nmore");
     assert_eq!(next(None, &failed, now(), 1).message, Some("boom".into()));
     assert_eq!(next(None, &report(Outcome::Noop), now(), 1).message, None);
+}
+
+#[test]
+fn record_persists_across_calls() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("status.json");
+    record(&path, &report(Outcome::Synced)).unwrap();
+    let written = record(&path, &report(Outcome::Synced)).unwrap();
+    let parsed: Status = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(parsed.attempt_seq, 2);
+    assert_eq!(parsed, written);
+}
+#[test]
+fn corrupt_file_is_replaced() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("status.json");
+    std::fs::write(&path, "{not json").unwrap();
+    let status = record(&path, &report(Outcome::Synced)).unwrap();
+    assert_eq!(status.attempt_seq, 1);
+}
+#[test]
+fn concurrent_records_lose_no_increment() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("status.json");
+    let threads: Vec<_> = (0..8)
+        .map(|_| {
+            let path = path.clone();
+            std::thread::spawn(move || {
+                for _ in 0..25 {
+                    record(&path, &report(Outcome::Synced)).unwrap();
+                }
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    let parsed: Status = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(parsed.attempt_seq, 200);
 }
