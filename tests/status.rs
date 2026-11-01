@@ -165,3 +165,32 @@ fn concurrent_records_lose_no_increment() {
     let parsed: Status = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(parsed.attempt_seq, 200);
 }
+
+#[test]
+fn counters_since_marks_each_counter_epoch() {
+    let first = next(None, &report(Outcome::Synced), now(), 1);
+    assert_eq!(
+        first.counters_since,
+        humantime::format_rfc3339_seconds(now()).to_string()
+    );
+    let later = next(
+        Some(&first),
+        &report(Outcome::Synced),
+        now() + Duration::from_secs(600),
+        1,
+    );
+    assert_eq!(later.counters_since, first.counters_since);
+}
+#[test]
+fn unreadable_previous_file_is_an_error_not_a_reset() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("status.json");
+    use std::os::unix::fs::PermissionsExt;
+    record(&path, &report(Outcome::Synced)).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let result = record(&path, &report(Outcome::Synced));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(result.is_err());
+    let kept: Status = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(kept.attempt_seq, 1);
+}

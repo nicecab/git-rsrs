@@ -114,7 +114,10 @@ pub fn sync_once_guarded(
     report.diagnostics.extend(hooks.diagnostics);
     report.hook_failures.extend(hooks.failures);
     // Written last so it reflects on_result; failure to write never changes the outcome.
+    // An attempt cut short by our own SIGINT/SIGTERM says nothing about the
+    // repository's health, so it is not recorded.
     if let Some(path) = &config.status_file
+        && !crate::process::CANCELLED.load(std::sync::atomic::Ordering::Relaxed)
         && let Err(error) = crate::status::record(path, &report)
     {
         eprintln!("cannot write status file {}: {error}", path.display());

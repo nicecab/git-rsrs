@@ -33,6 +33,9 @@ pub struct Status {
     pub pid: u32,
     pub git_rsrs_version: String,
     pub hook_failures: Vec<HookFailure>,
+    /// When the counters (and `attempt_seq`) started. A change means they were
+    /// reset, so a consumer must discard anything keyed on an earlier `attempt_seq`.
+    pub counters_since: String,
     pub attempt_seq: u64,
     pub consecutive_failures: u32,
     pub consecutive_successes: u32,
@@ -87,6 +90,7 @@ pub fn next(previous: Option<&Status>, report: &SyncReport, now: SystemTime, pid
         );
         recent.truncate(RECENT_LEN);
     }
+    let counters_since = previous.map_or_else(|| stamp.clone(), |p| p.counters_since.clone());
     Status {
         version: STATUS_VERSION,
         last_attempt_at: stamp.clone(),
@@ -105,6 +109,7 @@ pub fn next(previous: Option<&Status>, report: &SyncReport, now: SystemTime, pid
         pid,
         git_rsrs_version: env!("CARGO_PKG_VERSION").into(),
         hook_failures: report.hook_failures.clone(),
+        counters_since,
         attempt_seq,
         consecutive_failures,
         consecutive_successes,
@@ -133,9 +138,13 @@ pub fn record(path: &Path, report: &SyncReport) -> io::Result<Status> {
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(lock_path(path))?;
     lock.lock()?;
-    let previous = fs::read_to_string(path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Status>(&text).ok());
+    // Only a missing or unparsable file starts afresh; other read errors must
+    // not silently reset the counters.
+    let previous = match fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str::<Status>(&text).ok(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error),
+    };
     let status = next(
         previous.as_ref(),
         report,

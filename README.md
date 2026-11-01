@@ -98,7 +98,8 @@ directory must already exist.
 | `message` | First line of the latest sync diagnostic, or `null` |
 | `pid`, `git_rsrs_version` | Writer process and version |
 | `hook_failures` | Hooks that failed or timed out in the latest attempt: `phase`, `timed_out`, `message`. Pre-commit rejections are not failures. |
-| `attempt_seq` | Number of counted attempts so far |
+| `counters_since` | RFC 3339 time the counters started. It changes only when they restart, so a consumer must discard anything keyed on an earlier `attempt_seq` when it changes. |
+| `attempt_seq` | Number of counted attempts since `counters_since` |
 | `consecutive_failures`, `consecutive_successes` | Counted attempts in a row that were unhealthy / healthy |
 | `recent` | Last 10 counted attempts, newest first, as `{seq, healthy}` |
 
@@ -108,7 +109,10 @@ It is unhealthy when its outcome is `failed`, `timed_out`,
 failed. `branch_skipped`, `offline`, `deferred`, `lock_timeout` and
 `validation_rejected` are not counted: they update `last_attempt_at` and
 `last_outcome` but leave `attempt_seq`, the counters and `recent` unchanged. A
-missing or unreadable previous file starts the counters afresh.
+missing or unparsable previous file starts the counters afresh with a new
+`counters_since`; any other read error is reported as a write failure and the
+file is left as it was. An attempt cut short by SIGINT or SIGTERM is not
+recorded, because it says nothing about the repository's health.
 
 ## Synchronization
 
