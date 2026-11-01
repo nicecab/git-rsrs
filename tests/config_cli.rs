@@ -39,3 +39,26 @@ fn validates_configuration_and_uses_documented_defaults() {
     let config = Config::parse("version = 1\nbranch = 'main'\n[[hooks.pre_commit]]\ncommand = ['docsctl', 'check', '--changed']\nreject_exit_codes = [3]").unwrap();
     assert_eq!(config.hooks.pre_commit[0].timeout, Duration::from_secs(30));
 }
+
+#[test]
+fn status_file_must_be_absolute() {
+    let error = Config::parse("version=1\nbranch='main'\nstatus_file='rel/status.json'\n")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("status_file must be an absolute path"),
+        "{error}"
+    );
+    let config =
+        Config::parse("version=1\nbranch='main'\nstatus_file='/tmp/rsrs/status.json'\n").unwrap();
+    assert_eq!(
+        config.status_file,
+        Some(std::path::PathBuf::from("/tmp/rsrs/status.json"))
+    );
+    assert_eq!(
+        Config::parse("version=1\nbranch='main'\n")
+            .unwrap()
+            .status_file,
+        None
+    );
+}

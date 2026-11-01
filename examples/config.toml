@@ -6,6 +6,8 @@ interval = "5m"
 git_timeout = "120s"
 lock_timeout = "30s"
 lock_name = "git-rsrs.lock"
+# Optional; must be absolute. See "Status file" in README.md.
+# status_file = "/absolute/path/status.json"
 
 # Consumer example only. To interoperate with an existing checkout lock,
 # set lock_name to its agreed filename (for example, docs-maintenance.lock).

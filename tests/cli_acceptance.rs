@@ -255,3 +255,56 @@ fn stopping_watch_during_initial_git_inspection_is_graceful() {
         String::from_utf8_lossy(&output.stdout)
     );
 }
+
+fn sync_with_status(f: &Fixture, status: &std::path::Path) -> std::process::Output {
+    let cfg = f.temp.path().join("status-config.toml");
+    fs::write(
+        &cfg,
+        format!(
+            "version=1\nbranch='main'\nstatus_file={:?}\n[[hooks.on_result]]\ncommand=['sh','-c','exit 1']\n",
+            status.to_str().unwrap()
+        ),
+    )
+    .unwrap();
+    Command::new(env!("CARGO_BIN_EXE_git-rsrs"))
+        .arg("--repo")
+        .arg(&f.a)
+        .arg("--config")
+        .arg(cfg)
+        .args(["--json", "sync"])
+        .output()
+        .unwrap()
+}
+#[test]
+fn sync_writes_status_file_with_on_result_failure() {
+    let f = Fixture::new();
+    let status = f.temp.path().join("state").join("status.json");
+    fs::create_dir(status.parent().unwrap()).unwrap();
+    let output = sync_with_status(&f, &status);
+    assert_eq!(output.status.code(), Some(0));
+    let parsed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&status).unwrap()).unwrap();
+    assert!(
+        ["noop", "synced"].contains(&parsed["last_outcome"].as_str().unwrap()),
+        "{parsed}"
+    );
+    assert_eq!(parsed["hook_failures"][0]["phase"], "on_result");
+    assert_eq!(parsed["consecutive_failures"], 1);
+    sync_with_status(&f, &status);
+    let parsed: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&status).unwrap()).unwrap();
+    assert_eq!(parsed["attempt_seq"], 2);
+}
+#[test]
+fn unwritable_status_dir_does_not_change_outcome() {
+    let f = Fixture::new();
+    let status = f.temp.path().join("missing-dir").join("status.json");
+    let output = sync_with_status(&f, &status);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("status file"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!status.exists());
+}

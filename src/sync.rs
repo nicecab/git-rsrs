@@ -113,6 +113,12 @@ pub fn sync_once_guarded(
     let hooks = HookRunner.run(HookPhase::OnResult, &config.hooks.on_result, &context);
     report.diagnostics.extend(hooks.diagnostics);
     report.hook_failures.extend(hooks.failures);
+    // Written last so it reflects on_result; failure to write never changes the outcome.
+    if let Some(path) = &config.status_file
+        && let Err(error) = crate::status::record(path, &report)
+    {
+        eprintln!("cannot write status file {}: {error}", path.display());
+    }
     report
 }
 fn sync_locked(

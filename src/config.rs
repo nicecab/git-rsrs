@@ -62,6 +62,9 @@ pub struct Config {
     pub git_timeout: Duration,
     #[serde(default = "quiet", deserialize_with = "duration")]
     pub lock_timeout: Duration,
+    /// Absolute path of the status file written after every attempt.
+    #[serde(default)]
+    pub status_file: Option<PathBuf>,
     #[serde(default)]
     pub hooks: Hooks,
     #[serde(skip)]
@@ -106,6 +109,13 @@ impl Config {
             return Err(invalid(
                 "lock_name must be a non-reserved plain .lock filename",
             ));
+        }
+        if config
+            .status_file
+            .as_ref()
+            .is_some_and(|p| !p.is_absolute())
+        {
+            return Err(invalid("status_file must be an absolute path"));
         }
         for hook in config
             .hooks
