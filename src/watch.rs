@@ -29,6 +29,26 @@ pub enum WatchError {
     #[error("active synchronization was interrupted; inspect its report before restarting")]
     Interrupted,
 }
+#[derive(Default)]
+struct IndexLockTracker(Option<Instant>);
+impl IndexLockTracker {
+    fn observe(&mut self, report: &SyncReport, path: &Path, now: Instant) {
+        if report.outcome == Outcome::LockTimeout
+            && report
+                .recovery
+                .iter()
+                .any(|entry| *entry == path.to_string_lossy())
+        {
+            self.0.get_or_insert(now);
+        } else {
+            self.0 = None;
+        }
+    }
+    fn persistent(&self, now: Instant) -> bool {
+        self.0
+            .is_some_and(|since| now.duration_since(since) >= Duration::from_secs(180))
+    }
+}
 pub fn event_relevant(git: &Git, path: &Path) -> Result<bool, GitError> {
     if path.starts_with(&git.git_dir) {
         return Ok(false);
@@ -101,7 +121,7 @@ fn watch_loop(config: &Config, mut emit: impl FnMut(SyncReport)) -> Result<(), W
     );
     let (report_tx, report_rx) = mpsc::channel::<SyncReport>();
     let mut worker = WorkerGuard(None);
-    let mut index_lock_since: Option<Instant> = None;
+    let mut index_lock = IndexLockTracker::default();
     let changes = Arc::new(AtomicU64::new(0));
     let launcher = Launcher {
         config,
@@ -135,16 +155,7 @@ fn watch_loop(config: &Config, mut emit: impl FnMut(SyncReport)) -> Result<(), W
             };
             if let Some(report) = finished {
                 let outcome = report.outcome;
-                if outcome == Outcome::LockTimeout
-                    && report
-                        .recovery
-                        .iter()
-                        .any(|path| *path == git.paths.index_lock.to_string_lossy())
-                {
-                    index_lock_since.get_or_insert_with(Instant::now);
-                } else {
-                    index_lock_since = None;
-                }
+                index_lock.observe(&report, &git.paths.index_lock, Instant::now());
                 emit(report);
                 if outcome == Outcome::ManualIntervention {
                     eprintln!(
@@ -154,7 +165,12 @@ fn watch_loop(config: &Config, mut emit: impl FnMut(SyncReport)) -> Result<(), W
                 if let Some(request) =
                     scheduler.on_event(SchedulerEvent::RunFinished(outcome), Instant::now())
                 {
-                    launcher.start(&mut scheduler, &mut worker, request, index_lock_since)?;
+                    launcher.start(
+                        &mut scheduler,
+                        &mut worker,
+                        request,
+                        index_lock.persistent(Instant::now()),
+                    )?;
                 }
             }
             if overflow.swap(false, Ordering::Relaxed) {
@@ -163,7 +179,12 @@ fn watch_loop(config: &Config, mut emit: impl FnMut(SyncReport)) -> Result<(), W
                     && let Some(request) =
                         scheduler.on_event(SchedulerEvent::LocalChange, Instant::now())
                 {
-                    launcher.start(&mut scheduler, &mut worker, request, index_lock_since)?;
+                    launcher.start(
+                        &mut scheduler,
+                        &mut worker,
+                        request,
+                        index_lock.persistent(Instant::now()),
+                    )?;
                 }
             }
             match event_rx.recv_timeout(Duration::from_millis(20)) {
@@ -177,7 +198,7 @@ fn watch_loop(config: &Config, mut emit: impl FnMut(SyncReport)) -> Result<(), W
                                 &mut scheduler,
                                 &mut worker,
                                 request,
-                                index_lock_since,
+                                index_lock.persistent(Instant::now()),
                             )?;
                         }
                     }
@@ -187,7 +208,12 @@ fn watch_loop(config: &Config, mut emit: impl FnMut(SyncReport)) -> Result<(), W
             }
             if let Some(request) = scheduler.on_event(SchedulerEvent::PeriodicTick, Instant::now())
             {
-                launcher.start(&mut scheduler, &mut worker, request, index_lock_since)?;
+                launcher.start(
+                    &mut scheduler,
+                    &mut worker,
+                    request,
+                    index_lock.persistent(Instant::now()),
+                )?;
             }
         }
     })();
@@ -218,11 +244,11 @@ impl Launcher<'_> {
         scheduler: &mut Scheduler,
         worker: &mut Option<JoinHandle<()>>,
         request: RunRequest,
-        index_lock_since: Option<Instant>,
+        persistent_index_lock: bool,
     ) -> Result<(), WatchError> {
         let git = self.git;
         let commit_local = request.trigger == Trigger::LocalChange;
-        // Reconcile status before a periodic/initial run: native watcher delivery can lag.
+        // Lock retries must probe even a dirty tree; sync still defers commits until quiet.
         if !commit_local && !request.lock_retry && git.is_dirty()? {
             scheduler.defer_local(Instant::now());
             return Ok(());
@@ -233,14 +259,12 @@ impl Launcher<'_> {
         let tx = self.tx.clone();
         debug_assert!(worker.is_none());
         *worker = Some(thread::spawn(move || {
-            let persistent =
-                index_lock_since.is_some_and(|since| since.elapsed() >= Duration::from_secs(180));
             let report = sync_once_guarded_with_lock_policy(
                 &config,
                 request.trigger,
                 commit_local,
                 || changes.load(Ordering::Relaxed) == generation,
-                persistent,
+                persistent_index_lock,
             );
             let _ = tx.send(report);
         }));
@@ -284,5 +308,30 @@ impl Drop for WorkerGuard {
             CANCELLED.store(true, Ordering::Relaxed);
             let _ = worker.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_lock_escalates_after_three_minutes_and_resets_after_other_outcomes() {
+        let start = Instant::now();
+        let path = Path::new("/repo/.git/index.lock");
+        let mut tracker = IndexLockTracker::default();
+        let mut report = SyncReport::new(Trigger::Periodic);
+        report.outcome = Outcome::LockTimeout;
+        report.recovery.push(path.display().to_string());
+        tracker.observe(&report, path, start);
+        assert!(!tracker.persistent(start + Duration::from_secs(179)));
+        assert!(tracker.persistent(start + Duration::from_secs(180)));
+        report.outcome = Outcome::Noop;
+        tracker.observe(&report, path, start + Duration::from_secs(181));
+        assert!(!tracker.persistent(start + Duration::from_secs(400)));
+        report.outcome = Outcome::LockTimeout;
+        report.recovery.clear();
+        tracker.observe(&report, path, start + Duration::from_secs(200));
+        assert!(!tracker.persistent(start + Duration::from_secs(400)));
     }
 }

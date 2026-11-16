@@ -5,6 +5,7 @@ use std::{fs, path::PathBuf};
 pub enum Integration {
     Integrated { changed: bool },
     DirtyWorktree,
+    IndexLocked,
     RebaseConflict { recovery: Vec<String> },
     RecoveryRequired { recovery: Vec<String> },
 }
@@ -177,6 +178,13 @@ impl Git {
             });
         }
         fs::remove_file(journal)?;
+        if let Err(GitError::Command { message, .. }) = &result
+            && message.contains("Unable to create")
+            && message.contains(self.paths.index_lock.to_string_lossy().as_ref())
+            && message.contains("File exists")
+        {
+            return Ok(Integration::IndexLocked);
+        }
         // Git refuses to start over an edit that landed after the dirty check.
         if matches!(result, Err(GitError::Command { .. })) && self.is_dirty()? {
             return Ok(Integration::DirtyWorktree);

@@ -31,6 +31,106 @@ fn untracked_node_modules_stops_before_commit() {
     assert!(f.a.join("app/node_modules/pkg/generated").exists());
 }
 #[test]
+fn generated_directory_is_detected_before_clean_filter_runs() {
+    let f = Fixture::new();
+    let c = f.config();
+    fs::create_dir_all(f.a.join("app/node_modules/pkg")).unwrap();
+    fs::write(f.a.join("app/node_modules/pkg/generated"), "content").unwrap();
+    fs::write(
+        f.a.join(".git/info/attributes"),
+        "generated filter=broken\n",
+    )
+    .unwrap();
+    git(&f.a, ["config", "filter.broken.clean", "false"]);
+    git(&f.a, ["config", "filter.broken.required", "true"]);
+    let report = sync_once(&c, Trigger::Manual);
+    assert_eq!(report.outcome, Outcome::ManualIntervention, "{report:?}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("app/node_modules")),
+        "{report:?}"
+    );
+}
+#[test]
+fn large_untracked_generated_tree_is_reported_as_manual_intervention() {
+    let f = Fixture::new();
+    let directory = f.a.join("app/node_modules/pkg");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("tracked"), "tracked").unwrap();
+    git(&f.a, ["add", "app/node_modules/pkg/tracked"]);
+    git(&f.a, ["commit", "-m", "track one generated file"]);
+    for i in 0..30_000 {
+        fs::write(
+            directory.join(format!("generated-file-{i:05}-long-name.js")),
+            "",
+        )
+        .unwrap();
+    }
+    assert!(
+        git_rsrs::git::Git::open(&f.a, git_rsrs::process::ProcessRunner)
+            .unwrap()
+            .is_dirty()
+            .unwrap()
+    );
+    let report = sync_once(&f.config(), Trigger::Manual);
+    assert_eq!(report.outcome, Outcome::ManualIntervention, "{report:?}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("app/node_modules"))
+    );
+}
+
+#[test]
+fn untracked_symlink_named_node_modules_is_committed() {
+    use std::os::unix::fs::symlink;
+    let f = Fixture::new();
+    symlink("elsewhere", f.a.join("node_modules")).unwrap();
+    let report = sync_once(&f.config(), Trigger::Manual);
+    assert_eq!(report.outcome, Outcome::Synced, "{report:?}");
+    assert_eq!(text(&f.origin, &["show", "main:node_modules"]), "elsewhere");
+}
+#[test]
+fn index_lock_acquired_during_validation_returns_lock_timeout() {
+    let f = Fixture::new();
+    fs::write(f.a.join("new"), "local").unwrap();
+    let ready = f.temp.path().join("ready");
+    let release = f.temp.path().join("release");
+    let script = f.temp.path().join("wait.py");
+    fs::write(&script, format!("import pathlib,time\npathlib.Path({:?}).touch()\nwhile not pathlib.Path({:?}).exists(): time.sleep(.01)\n", ready, release)).unwrap();
+    let config = format!(
+        "version=1\nbranch='main'\n[[hooks.pre_commit]]\ncommand=['python3',{:?}]\n",
+        script.to_str().unwrap()
+    );
+    let child = spawn_sync(&f, &config);
+    assert!(wait_for(&ready));
+    let lock = f.a.join(".git/index.lock");
+    fs::write(&lock, "held").unwrap();
+    fs::write(release, "go").unwrap();
+    let report = finish_sync(child);
+    assert_eq!(report.outcome, Outcome::LockTimeout, "{report:?}");
+    assert!(lock.exists());
+}
+#[test]
+fn index_lock_acquired_during_rebase_returns_lock_timeout() {
+    let f = Fixture::new();
+    f.commit(&f.a, "local", "local");
+    f.commit(&f.b, "remote", "remote");
+    git(&f.b, ["push"]);
+    let barrier = barrier_hook(&f, "pre-rebase");
+    let child = spawn_sync(&f, "version=1\nbranch='main'");
+    assert!(barrier.wait());
+    let lock = f.a.join(".git/index.lock");
+    fs::write(&lock, "held").unwrap();
+    barrier.release();
+    let report = finish_sync(child);
+    assert_eq!(report.outcome, Outcome::LockTimeout, "{report:?}");
+    assert!(lock.exists());
+}
+#[test]
 fn explicitly_staged_node_modules_remain_committable() {
     let f = Fixture::new();
     let c = f.config();
@@ -42,6 +142,24 @@ fn explicitly_staged_node_modules_remain_committable() {
     assert_eq!(
         text(&f.origin, &["show", "main:node_modules/pkg/file"]),
         "intentional"
+    );
+}
+#[test]
+fn partially_staged_node_modules_still_blocks_commit() {
+    let f = Fixture::new();
+    let directory = f.a.join("node_modules/pkg");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("staged"), "staged").unwrap();
+    git(&f.a, ["add", "node_modules/pkg/staged"]);
+    fs::write(directory.join("untracked"), "untracked").unwrap();
+    let report = sync_once(&f.config(), Trigger::Manual);
+    assert_eq!(report.outcome, Outcome::ManualIntervention, "{report:?}");
+    assert_eq!(
+        text(
+            &f.a,
+            &["status", "--porcelain=v1", "--", "node_modules/pkg/staged"]
+        ),
+        "A  node_modules/pkg/staged"
     );
 }
 fn reject(c: &mut Config) {

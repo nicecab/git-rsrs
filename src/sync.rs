@@ -3,6 +3,7 @@ use crate::{
     git::{
         Git, GitError, RepositoryState,
         integrate::{Integration, PushResult},
+        nul_paths,
         snapshot::{CommitResult, Snapshot},
     },
     hooks::{HookContext, HookDecision, HookPhase, HookRunner},
@@ -80,6 +81,60 @@ fn manual(message: impl Into<String>) -> Failure {
         message: message.into(),
         recovery: vec![],
     }
+}
+fn index_locked(git: &Git, persistent: bool) -> Failure {
+    Failure {
+        outcome: if persistent {
+            Outcome::ManualIntervention
+        } else {
+            Outcome::LockTimeout
+        },
+        message: format!(
+            "Git index lock is held{}: {}",
+            if persistent {
+                " for at least 3 minutes"
+            } else {
+                ""
+            },
+            git.paths.index_lock.display()
+        ),
+        recovery: vec![git.paths.index_lock.display().to_string()],
+    }
+}
+
+fn reject_generated_directory(git: &Git) -> Result<(), Failure> {
+    let output = git.run_prefix([
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "--directory",
+        "-z",
+        "--",
+        ":(glob)**/node_modules/**",
+    ])?;
+    let Some(end) = output.stdout.iter().position(|b| *b == 0) else {
+        return if output.truncated {
+            Err(GitError::Invalid(
+                "Git output exceeded the capture limit before the first path".into(),
+            )
+            .into())
+        } else {
+            Ok(())
+        };
+    };
+    for path in nul_paths(&output.stdout[..=end]) {
+        let mut directory = std::path::PathBuf::new();
+        for component in path.components() {
+            directory.push(component.as_os_str());
+            if component.as_os_str() == "node_modules" {
+                return Err(manual(format!(
+                    "untracked generated directory {:?}; ignore or explicitly stage its contents before retrying",
+                    directory
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn sync_once(config: &Config, trigger: Trigger) -> SyncReport {
@@ -160,15 +215,7 @@ fn sync_locked(
         }
     }
     if git.paths.index_lock.exists() {
-        return Err(Failure {
-            outcome: if persistent_index_lock {
-                Outcome::ManualIntervention
-            } else {
-                Outcome::LockTimeout
-            },
-            message: format!("Git index lock is held: {}", git.paths.index_lock.display()),
-            recovery: vec![git.paths.index_lock.display().to_string()],
-        });
+        return Err(index_locked(&git, persistent_index_lock));
     }
     let state = git.state()?;
     if state != RepositoryState::Ready {
@@ -187,26 +234,17 @@ fn sync_locked(
     let mut expected_head = git.head()?;
     let context = HookContext::new(&git.root, report.trigger);
     let mut rejected = false;
+    if commit_local {
+        reject_generated_directory(&git)?;
+    }
     if git.is_dirty()? {
         if !commit_local {
             report.outcome = Outcome::Deferred;
             return Ok(());
         }
         let candidate = Snapshot::capture(&git)?;
-        for entry in git.status()? {
-            if entry.code == *b"??" {
-                let mut directory = std::path::PathBuf::new();
-                for component in entry.path.components() {
-                    directory.push(component.as_os_str());
-                    if component.as_os_str() == "node_modules" {
-                        return Err(manual(format!(
-                            "untracked generated directory {:?}; ignore or explicitly stage its contents before retrying",
-                            directory
-                        )));
-                    }
-                }
-            }
-        }
+        // Catch generated content that appeared while the candidate was captured.
+        reject_generated_directory(&git)?;
         let mut validation_context = context.clone();
         validation_context.index = Some(candidate.index.clone());
         let checks = HookRunner.run(
@@ -237,6 +275,9 @@ fn sync_locked(
                     return Ok(());
                 }
                 match candidate.commit_validated(&git)? {
+                    CommitResult::IndexLocked => {
+                        return Err(index_locked(&git, persistent_index_lock));
+                    }
                     CommitResult::Created(oid) => {
                         expected_head = oid.clone();
                         report.committed = Some(oid);
@@ -265,6 +306,7 @@ fn sync_locked(
         &context,
         &mut post_failed,
         &mut expected_head,
+        persistent_index_lock,
     )? {
         wait_for_clean_worktree(report, rejected);
         return Ok(());
@@ -278,6 +320,7 @@ fn sync_locked(
                 &context,
                 &mut post_failed,
                 &mut expected_head,
+                persistent_index_lock,
             )? {
                 wait_for_clean_worktree(report, rejected);
                 return Ok(());
@@ -324,6 +367,7 @@ fn fetch_and_integrate(
     context: &HookContext,
     post_failed: &mut bool,
     expected_head: &mut String,
+    persistent_index_lock: bool,
 ) -> Result<bool, Failure> {
     require_identity(git, config, expected_head)?;
     git.fetch(&config.remote, &config.branch)?;
@@ -337,17 +381,17 @@ fn fetch_and_integrate(
             report.integrated |= changed;
         }
         Integration::DirtyWorktree => return Ok(false),
+        Integration::IndexLocked => return Err(index_locked(git, persistent_index_lock)),
         Integration::RebaseConflict { recovery } | Integration::RecoveryRequired { recovery } => {
             let paths = recovery
                 .iter()
-                .filter(|entry| entry.starts_with("conflicted path: "))
-                .cloned()
+                .filter_map(|entry| entry.strip_prefix("conflicted path: "))
                 .collect::<Vec<_>>();
             let message = if paths.is_empty() {
                 "integration requires manual intervention".into()
             } else {
                 format!(
-                    "integration requires manual intervention; {}",
+                    "integration requires manual intervention; conflicted: {}",
                     paths.join(", ")
                 )
             };
