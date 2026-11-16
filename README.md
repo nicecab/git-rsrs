@@ -34,6 +34,9 @@ The configured branch is required. A different checked-out branch is skipped;
 rsrs never switches branches. Existing merge/rebase/cherry-pick/revert/bisect states,
 unborn repositories, detached HEAD, and unmerged index entries require manual intervention. Unresolved
 recovery journals and another Git index lock also prevent automatic mutations.
+An untracked `node_modules` directory stops synchronization before committing and
+pauses watch until it is restarted. Ignore the directory or explicitly stage all
+its untracked contents; partially staged contents still stop synchronization.
 
 ## Homebrew
 
@@ -241,6 +244,20 @@ for collisions before integration, including paths touched by intermediate repla
 commits; ignored directories are protected as units, so
 incoming tracked content beneath one also requires manual attention.
 
+An index lock reports `lock_timeout`. Watch retries with backoff and, if the
+lock remains present for at least three minutes, reports `manual_intervention`
+and pauses. After a retained rebase is resolved and continued, the next sync
+clears its integration journal only when the recorded commits, current Git
+state and branch reflog establish a completed rebase. Otherwise the journal
+remains for inspection. Conflicted paths appear in the report and status message.
+Automatic cleanup requires the latest branch reflog entry to be the completed
+rebase and its previous value to be the recorded original HEAD. Later commits,
+an expired reflog, or a disabled reflog prevent this check. In that case, stop
+watch, inspect `git status`, the journal and the branch history; only after
+confirming the operation is finished and the repository is safe, remove the
+integration journal using `rm -- "$(git rev-parse --git-path git-rsrs-integrate.json)"`
+and restart watch. Do not remove a journal for an active or uncertain operation.
+
 A fatal outcome takes precedence over validation rejection; reporting-hook failures
 never replace the primary result.
 
@@ -251,7 +268,7 @@ never replace the primary result.
 | 2 | Usage or configuration error |
 | 3 | Validation rejection or post-integration check failure |
 | 4 | Manual intervention or interrupted active synchronization |
-| 5 | Checkout lock timeout |
+| 5 | Checkout lock timeout or Git index lock held |
 | 6 | Recognized network unavailability; local commits retained |
 | 7 | Command or hook timeout |
 

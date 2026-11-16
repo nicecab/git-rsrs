@@ -176,3 +176,52 @@ fn successful_local_run_after_a_defer_clears_pending_work() {
         Trigger::Periodic
     );
 }
+
+#[test]
+fn lock_retry_does_not_wait_for_a_long_quiet_period() {
+    let t = Instant::now();
+    let mut s = Scheduler::new(seconds(3600), seconds(3600), t, false);
+    s.on_event(SchedulerEvent::PeriodicTick, t).unwrap();
+    s.on_event(
+        SchedulerEvent::RunFinished(Outcome::LockTimeout),
+        t + seconds(1),
+    );
+    assert!(
+        s.on_event(SchedulerEvent::PeriodicTick, t + seconds(2))
+            .is_some()
+    );
+}
+
+#[test]
+fn lock_retry_waits_for_backoff_even_when_local_changes_are_ready() {
+    let t = Instant::now();
+    let mut s = Scheduler::new(seconds(1), seconds(300), t, true);
+    s.on_event(SchedulerEvent::PeriodicTick, t + seconds(1))
+        .unwrap();
+    assert!(
+        s.on_event(
+            SchedulerEvent::RunFinished(Outcome::LockTimeout),
+            t + seconds(2)
+        )
+        .is_none()
+    );
+    assert!(
+        s.on_event(SchedulerEvent::PeriodicTick, t + seconds(3))
+            .is_some()
+    );
+    assert!(
+        s.on_event(
+            SchedulerEvent::RunFinished(Outcome::LockTimeout),
+            t + seconds(4)
+        )
+        .is_none()
+    );
+    assert!(
+        s.on_event(SchedulerEvent::PeriodicTick, t + seconds(5))
+            .is_none()
+    );
+    assert!(
+        s.on_event(SchedulerEvent::PeriodicTick, t + seconds(6))
+            .is_some()
+    );
+}

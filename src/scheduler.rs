@@ -10,6 +10,7 @@ pub enum SchedulerEvent {
 #[derive(Debug, Clone, Copy)]
 pub struct RunRequest {
     pub trigger: Trigger,
+    pub lock_retry: bool,
 }
 #[derive(Debug)]
 pub struct Scheduler {
@@ -23,6 +24,8 @@ pub struct Scheduler {
     initial: bool,
     paused: bool,
     shutdown: bool,
+    lock_retry_at: Option<Instant>,
+    lock_retry_delay: Duration,
 }
 impl Scheduler {
     pub fn new(quiet: Duration, interval: Duration, now: Instant, dirty: bool) -> Self {
@@ -37,6 +40,8 @@ impl Scheduler {
             initial: true,
             paused: false,
             shutdown: false,
+            lock_retry_at: None,
+            lock_retry_delay: Duration::from_secs(1),
         }
     }
     /// Clears the in-flight request and keeps local work pending for another quiet
@@ -61,8 +66,16 @@ impl Scheduler {
             SchedulerEvent::RunFinished(outcome) => {
                 if let Some(generation) = self.in_flight.take()
                     && generation == self.generation
+                    && outcome != Outcome::LockTimeout
                 {
                     self.last_change = None;
+                }
+                if outcome == Outcome::LockTimeout {
+                    self.lock_retry_at = Some(now + self.lock_retry_delay);
+                    self.lock_retry_delay = (self.lock_retry_delay * 2).min(Duration::from_secs(5));
+                } else {
+                    self.lock_retry_at = None;
+                    self.lock_retry_delay = Duration::from_secs(1);
                 }
                 if outcome == Outcome::Deferred {
                     self.defer_local(now);
@@ -76,10 +89,14 @@ impl Scheduler {
         if self.shutdown || self.paused || self.in_flight.is_some() {
             return None;
         }
+        if self.lock_retry_at.is_some_and(|at| now < at) {
+            return None;
+        }
         let local_ready = self
             .last_change
             .is_some_and(|last| now.duration_since(last) >= self.quiet);
-        if local_ready || (self.last_change.is_none() && self.pending_periodic) {
+        let lock_retry = self.lock_retry_at.is_some_and(|at| now >= at);
+        if lock_retry || local_ready || (self.last_change.is_none() && self.pending_periodic) {
             let trigger = if local_ready {
                 Trigger::LocalChange
             } else if self.initial {
@@ -91,7 +108,11 @@ impl Scheduler {
             self.pending_periodic = false;
             self.last_periodic = now;
             self.in_flight = Some(self.generation);
-            Some(RunRequest { trigger })
+            self.lock_retry_at = None;
+            Some(RunRequest {
+                trigger,
+                lock_retry,
+            })
         } else {
             None
         }

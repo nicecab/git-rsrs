@@ -132,6 +132,26 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.run_env_with_truncation(args, env, false)
+    }
+    /// Return output up to the capture limit for callers that only need a prefix.
+    pub(crate) fn run_prefix<I, S>(&self, args: I) -> Result<CommandOutput, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        self.run_env_with_truncation(args, &BTreeMap::new(), true)
+    }
+    fn run_env_with_truncation<I, S>(
+        &self,
+        args: I,
+        env: &BTreeMap<OsString, OsString>,
+        allow_truncated: bool,
+    ) -> Result<CommandOutput, GitError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         let mut spec = self.spec(args);
         spec.env.extend(env.clone());
         let output = self.runner.run(&spec)?;
@@ -152,7 +172,7 @@ impl Git {
                 output: Box::new(output),
             });
         }
-        if output.truncated {
+        if output.truncated && !allow_truncated {
             return Err(GitError::Invalid(
                 "Git output exceeded the capture limit".into(),
             ));
@@ -194,7 +214,7 @@ impl Git {
     }
     pub fn is_dirty(&self) -> Result<bool, GitError> {
         Ok(!self
-            .run(["status", "--porcelain=v1", "-z", "--untracked-files=normal"])?
+            .run_prefix(["status", "--porcelain=v1", "-z", "--untracked-files=normal"])?
             .stdout
             .is_empty())
     }

@@ -5,6 +5,7 @@ use std::{fs, path::PathBuf};
 pub enum Integration {
     Integrated { changed: bool },
     DirtyWorktree,
+    IndexLocked,
     RebaseConflict { recovery: Vec<String> },
     RecoveryRequired { recovery: Vec<String> },
 }
@@ -15,6 +16,55 @@ pub enum PushResult {
 }
 
 impl Git {
+    /// Clear only a completed rebase whose branch reflog still identifies the
+    /// recorded starting commit and whose result contains the recorded target.
+    pub fn clear_completed_integration(&self, branch: &str) -> Result<bool, GitError> {
+        let journal = &self.paths.integrate_journal;
+        let Ok(bytes) = fs::read(journal) else {
+            return Ok(false);
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            return Ok(false);
+        };
+        let Some(head) = value.get("head").and_then(|v| v.as_str()) else {
+            return Ok(false);
+        };
+        let Some(target) = value.get("target_oid").and_then(|v| v.as_str()) else {
+            return Ok(false);
+        };
+        if value.get("version").and_then(|v| v.as_u64()) != Some(1)
+            || ![head, target]
+                .iter()
+                .all(|s| matches!(s.len(), 40 | 64) && s.bytes().all(|c| c.is_ascii_hexdigit()))
+            || self.paths.index_lock.exists()
+            || self.state()? != super::RepositoryState::Ready
+            || self.branch()? != branch
+        {
+            return Ok(false);
+        }
+        let branch_ref = format!("refs/heads/{branch}");
+        let previous = format!("{branch_ref}@{{1}}");
+        let Ok(previous_head) = self.text(["rev-parse", "--verify", &previous]) else {
+            return Ok(false);
+        };
+        let Ok(message) = self.text(["reflog", "show", "-1", "--format=%gs", &branch_ref]) else {
+            return Ok(false);
+        };
+        if previous_head != head
+            || !message.starts_with("rebase (finish): ")
+            || self
+                .run(["merge-base", "--is-ancestor", target, "HEAD"])
+                .is_err()
+        {
+            return Ok(false);
+        }
+        // Refuse to remove a journal replaced during verification.
+        if fs::read(journal)? != bytes {
+            return Ok(false);
+        }
+        fs::remove_file(journal)?;
+        Ok(true)
+    }
     pub fn fetch(&self, remote: &str, branch: &str) -> Result<(), GitError> {
         self.run(["check-ref-format", "--branch", branch])?;
         self.run(["remote", "get-url", remote])?;
@@ -94,14 +144,21 @@ impl Git {
         ]);
         let active = self.paths.rebase_merge.exists() || self.paths.rebase_apply.exists();
         if result.is_err() && active {
+            // Classify lock failures only after ruling out an active rebase:
+            // an active operation must retain its journal for recovery.
             // Abort can hard-reset edits made by a concurrent editor. Retain the
             // operation instead of asserting that matching refs prove preservation.
-            return Ok(Integration::RebaseConflict {
-                recovery: vec![format!(
-                    "active rebase retained to preserve concurrent edits; inspect {}",
-                    journal.display()
-                )],
-            });
+            let mut recovery = vec![format!(
+                "active rebase retained to preserve concurrent edits; inspect {}",
+                journal.display()
+            )];
+            match self.run(["diff", "--name-only", "--diff-filter=U", "-z"]) {
+                Ok(output) => recovery.extend(
+                    nul_paths(&output.stdout).map(|path| format!("conflicted path: {:?}", path)),
+                ),
+                Err(_) => recovery.push("could not list conflicted paths".into()),
+            }
+            return Ok(Integration::RebaseConflict { recovery });
         }
         let unmerged = match self.has_unmerged() {
             Ok(value) => value,
@@ -123,6 +180,13 @@ impl Git {
             });
         }
         fs::remove_file(journal)?;
+        if let Err(GitError::Command { message, .. }) = &result
+            && message.contains("Unable to create")
+            && message.contains(self.paths.index_lock.to_string_lossy().as_ref())
+            && message.contains("File exists")
+        {
+            return Ok(Integration::IndexLocked);
+        }
         // Git refuses to start over an edit that landed after the dirty check.
         if matches!(result, Err(GitError::Command { .. })) && self.is_dirty()? {
             return Ok(Integration::DirtyWorktree);

@@ -3,6 +3,7 @@ use crate::{
     git::{
         Git, GitError, RepositoryState,
         integrate::{Integration, PushResult},
+        nul_paths,
         snapshot::{CommitResult, Snapshot},
     },
     hooks::{HookContext, HookDecision, HookPhase, HookRunner},
@@ -81,6 +82,61 @@ fn manual(message: impl Into<String>) -> Failure {
         recovery: vec![],
     }
 }
+fn index_locked(git: &Git, persistent: bool) -> Failure {
+    Failure {
+        outcome: if persistent {
+            Outcome::ManualIntervention
+        } else {
+            Outcome::LockTimeout
+        },
+        message: format!(
+            "Git index lock is held{}: {}",
+            if persistent {
+                " for at least 3 minutes"
+            } else {
+                ""
+            },
+            git.paths.index_lock.display()
+        ),
+        recovery: vec![git.paths.index_lock.display().to_string()],
+    }
+}
+
+fn reject_generated_directory(git: &Git) -> Result<(), Failure> {
+    let output = git.run_prefix([
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "--directory",
+        "-z",
+        "--",
+        ":(glob)**/node_modules/**",
+    ])?;
+    // The pathspec only matches paths inside node_modules, so one complete record suffices.
+    let Some(end) = output.stdout.iter().position(|b| *b == 0) else {
+        return if output.truncated {
+            Err(GitError::Invalid(
+                "Git output exceeded the capture limit before the first path".into(),
+            )
+            .into())
+        } else {
+            Ok(())
+        };
+    };
+    for path in nul_paths(&output.stdout[..=end]) {
+        let mut directory = std::path::PathBuf::new();
+        for component in path.components() {
+            directory.push(component.as_os_str());
+            if component.as_os_str() == "node_modules" {
+                return Err(manual(format!(
+                    "untracked generated directory {:?}; ignore or explicitly stage its contents before retrying",
+                    directory
+                )));
+            }
+        }
+    }
+    Ok(())
+}
 
 pub fn sync_once(config: &Config, trigger: Trigger) -> SyncReport {
     sync_once_guarded(config, trigger, true, || true)
@@ -94,6 +150,16 @@ pub fn sync_once_guarded(
     commit_local: bool,
     fresh: impl Fn() -> bool,
 ) -> SyncReport {
+    sync_once_guarded_with_lock_policy(config, trigger, commit_local, fresh, false)
+}
+
+pub(crate) fn sync_once_guarded_with_lock_policy(
+    config: &Config,
+    trigger: Trigger,
+    commit_local: bool,
+    fresh: impl Fn() -> bool,
+    persistent_index_lock: bool,
+) -> SyncReport {
     let mut report = SyncReport::new(trigger);
     let mut checkout_root = config.repo.clone();
     if let Err(failure) = sync_locked(
@@ -102,6 +168,7 @@ pub fn sync_once_guarded(
         &mut checkout_root,
         commit_local,
         &fresh,
+        persistent_index_lock,
     ) {
         report.outcome = failure.outcome;
         report.diagnostic("sync", failure.message);
@@ -130,16 +197,16 @@ fn sync_locked(
     checkout_root: &mut std::path::PathBuf,
     commit_local: bool,
     fresh: &dyn Fn() -> bool,
+    persistent_index_lock: bool,
 ) -> Result<(), Failure> {
     let mut git = Git::open(&config.repo, ProcessRunner)?;
     git.timeout = config.git_timeout;
     *checkout_root = git.root.clone();
     let _lock = CheckoutLock::acquire(&git, &config.lock_name, config.lock_timeout)?;
-    for path in [
-        &git.paths.commit_journal,
-        &git.paths.integrate_journal,
-        &git.paths.index_lock,
-    ] {
+    if git.paths.integrate_journal.exists() && !git.paths.commit_journal.exists() {
+        git.clear_completed_integration(&config.branch)?;
+    }
+    for path in [&git.paths.commit_journal, &git.paths.integrate_journal] {
         if path.exists() {
             return Err(Failure {
                 outcome: Outcome::ManualIntervention,
@@ -147,6 +214,9 @@ fn sync_locked(
                 recovery: vec![path.display().to_string()],
             });
         }
+    }
+    if git.paths.index_lock.exists() {
+        return Err(index_locked(&git, persistent_index_lock));
     }
     let state = git.state()?;
     if state != RepositoryState::Ready {
@@ -165,12 +235,17 @@ fn sync_locked(
     let mut expected_head = git.head()?;
     let context = HookContext::new(&git.root, report.trigger);
     let mut rejected = false;
+    if commit_local {
+        reject_generated_directory(&git)?;
+    }
     if git.is_dirty()? {
         if !commit_local {
             report.outcome = Outcome::Deferred;
             return Ok(());
         }
         let candidate = Snapshot::capture(&git)?;
+        // Catch generated content that appeared while the candidate was captured.
+        reject_generated_directory(&git)?;
         let mut validation_context = context.clone();
         validation_context.index = Some(candidate.index.clone());
         let checks = HookRunner.run(
@@ -201,6 +276,9 @@ fn sync_locked(
                     return Ok(());
                 }
                 match candidate.commit_validated(&git)? {
+                    CommitResult::IndexLocked => {
+                        return Err(index_locked(&git, persistent_index_lock));
+                    }
                     CommitResult::Created(oid) => {
                         expected_head = oid.clone();
                         report.committed = Some(oid);
@@ -229,6 +307,7 @@ fn sync_locked(
         &context,
         &mut post_failed,
         &mut expected_head,
+        persistent_index_lock,
     )? {
         wait_for_clean_worktree(report, rejected);
         return Ok(());
@@ -242,6 +321,7 @@ fn sync_locked(
                 &context,
                 &mut post_failed,
                 &mut expected_head,
+                persistent_index_lock,
             )? {
                 wait_for_clean_worktree(report, rejected);
                 return Ok(());
@@ -288,6 +368,7 @@ fn fetch_and_integrate(
     context: &HookContext,
     post_failed: &mut bool,
     expected_head: &mut String,
+    persistent_index_lock: bool,
 ) -> Result<bool, Failure> {
     require_identity(git, config, expected_head)?;
     git.fetch(&config.remote, &config.branch)?;
@@ -301,10 +382,28 @@ fn fetch_and_integrate(
             report.integrated |= changed;
         }
         Integration::DirtyWorktree => return Ok(false),
+        Integration::IndexLocked => return Err(index_locked(git, persistent_index_lock)),
         Integration::RebaseConflict { recovery } | Integration::RecoveryRequired { recovery } => {
+            let paths = recovery
+                .iter()
+                .filter_map(|entry| entry.strip_prefix("conflicted path: "))
+                .map(|path| {
+                    path.strip_prefix('"')
+                        .and_then(|p| p.strip_suffix('"'))
+                        .unwrap_or(path)
+                })
+                .collect::<Vec<_>>();
+            let message = if paths.is_empty() {
+                "integration requires manual intervention".into()
+            } else {
+                format!(
+                    "integration requires manual intervention; conflicted: {}",
+                    paths.join(", ")
+                )
+            };
             return Err(Failure {
                 outcome: Outcome::ManualIntervention,
-                message: "integration requires manual intervention".into(),
+                message,
                 recovery,
             });
         }

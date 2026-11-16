@@ -109,6 +109,19 @@ fn dirty_startup_waits_instead_of_committing_immediately() {
     assert_eq!(text(&f.origin, &["show", "main:new"]), "startup");
 }
 #[test]
+fn transient_index_lock_does_not_pause_watcher() {
+    let f = Fixture::new();
+    let lock = f.a.join(".git/index.lock");
+    fs::write(&lock, "held").unwrap();
+    fs::write(f.a.join("new"), "local").unwrap();
+    let watcher = WatchChild::start(&f, "100ms", "100ms");
+    thread::sleep(Duration::from_secs(1));
+    fs::remove_file(lock).unwrap();
+    let report = watcher.committed();
+    assert!(report.pushed, "{report:?}");
+    assert_eq!(text(&f.origin, &["show", "main:new"]), "local");
+}
+#[test]
 fn idle_periodic_sync_receives_remote_changes_without_local_events() {
     let f = Fixture::new();
     let watcher = WatchChild::start(&f, "200ms", "200ms");

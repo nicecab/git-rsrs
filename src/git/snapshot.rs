@@ -14,6 +14,7 @@ pub enum CommitResult {
     NoChanges,
     DeferredConcurrentChange,
     RecoveryRequired(String),
+    IndexLocked,
 }
 #[derive(Debug)]
 pub struct Snapshot {
@@ -88,10 +89,17 @@ impl Snapshot {
     }
     pub fn commit_validated(self, git: &Git) -> Result<CommitResult, GitError> {
         let lock_path = &git.paths.index_lock;
-        let mut index_lock = OpenOptions::new()
+        let mut index_lock = match OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(lock_path)?;
+            .open(lock_path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Ok(CommitResult::IndexLocked);
+            }
+            Err(error) => return Err(error.into()),
+        };
         if let Some(result) = self.early_result(git).transpose() {
             drop(index_lock);
             fs::remove_file(lock_path)?;
