@@ -94,6 +94,16 @@ pub fn sync_once_guarded(
     commit_local: bool,
     fresh: impl Fn() -> bool,
 ) -> SyncReport {
+    sync_once_guarded_with_lock_policy(config, trigger, commit_local, fresh, false)
+}
+
+pub(crate) fn sync_once_guarded_with_lock_policy(
+    config: &Config,
+    trigger: Trigger,
+    commit_local: bool,
+    fresh: impl Fn() -> bool,
+    persistent_index_lock: bool,
+) -> SyncReport {
     let mut report = SyncReport::new(trigger);
     let mut checkout_root = config.repo.clone();
     if let Err(failure) = sync_locked(
@@ -102,6 +112,7 @@ pub fn sync_once_guarded(
         &mut checkout_root,
         commit_local,
         &fresh,
+        persistent_index_lock,
     ) {
         report.outcome = failure.outcome;
         report.diagnostic("sync", failure.message);
@@ -130,16 +141,16 @@ fn sync_locked(
     checkout_root: &mut std::path::PathBuf,
     commit_local: bool,
     fresh: &dyn Fn() -> bool,
+    persistent_index_lock: bool,
 ) -> Result<(), Failure> {
     let mut git = Git::open(&config.repo, ProcessRunner)?;
     git.timeout = config.git_timeout;
     *checkout_root = git.root.clone();
     let _lock = CheckoutLock::acquire(&git, &config.lock_name, config.lock_timeout)?;
-    for path in [
-        &git.paths.commit_journal,
-        &git.paths.integrate_journal,
-        &git.paths.index_lock,
-    ] {
+    if git.paths.integrate_journal.exists() && !git.paths.commit_journal.exists() {
+        git.clear_completed_integration(&config.branch)?;
+    }
+    for path in [&git.paths.commit_journal, &git.paths.integrate_journal] {
         if path.exists() {
             return Err(Failure {
                 outcome: Outcome::ManualIntervention,
@@ -147,6 +158,17 @@ fn sync_locked(
                 recovery: vec![path.display().to_string()],
             });
         }
+    }
+    if git.paths.index_lock.exists() {
+        return Err(Failure {
+            outcome: if persistent_index_lock {
+                Outcome::ManualIntervention
+            } else {
+                Outcome::LockTimeout
+            },
+            message: format!("Git index lock is held: {}", git.paths.index_lock.display()),
+            recovery: vec![git.paths.index_lock.display().to_string()],
+        });
     }
     let state = git.state()?;
     if state != RepositoryState::Ready {
@@ -171,6 +193,20 @@ fn sync_locked(
             return Ok(());
         }
         let candidate = Snapshot::capture(&git)?;
+        for entry in git.status()? {
+            if entry.code == *b"??" {
+                let mut directory = std::path::PathBuf::new();
+                for component in entry.path.components() {
+                    directory.push(component.as_os_str());
+                    if component.as_os_str() == "node_modules" {
+                        return Err(manual(format!(
+                            "untracked generated directory {:?}; ignore or explicitly stage its contents before retrying",
+                            directory
+                        )));
+                    }
+                }
+            }
+        }
         let mut validation_context = context.clone();
         validation_context.index = Some(candidate.index.clone());
         let checks = HookRunner.run(
@@ -302,9 +338,22 @@ fn fetch_and_integrate(
         }
         Integration::DirtyWorktree => return Ok(false),
         Integration::RebaseConflict { recovery } | Integration::RecoveryRequired { recovery } => {
+            let paths = recovery
+                .iter()
+                .filter(|entry| entry.starts_with("conflicted path: "))
+                .cloned()
+                .collect::<Vec<_>>();
+            let message = if paths.is_empty() {
+                "integration requires manual intervention".into()
+            } else {
+                format!(
+                    "integration requires manual intervention; {}",
+                    paths.join(", ")
+                )
+            };
             return Err(Failure {
                 outcome: Outcome::ManualIntervention,
-                message: "integration requires manual intervention".into(),
+                message,
                 recovery,
             });
         }

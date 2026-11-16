@@ -12,6 +12,38 @@ use std::{
     time::Duration,
 };
 const WAITING: &str = "remote has new commits; integration waits for a clean worktree";
+#[test]
+fn untracked_node_modules_stops_before_commit() {
+    let f = Fixture::new();
+    let c = f.config();
+    fs::create_dir_all(f.a.join("app/node_modules/pkg")).unwrap();
+    fs::write(f.a.join("app/node_modules/pkg/generated"), "content").unwrap();
+    let head = text(&f.a, &["rev-parse", "HEAD"]);
+    let report = sync_once(&c, Trigger::Manual);
+    assert_eq!(report.outcome, Outcome::ManualIntervention, "{report:?}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("app/node_modules"))
+    );
+    assert_eq!(text(&f.a, &["rev-parse", "HEAD"]), head);
+    assert!(f.a.join("app/node_modules/pkg/generated").exists());
+}
+#[test]
+fn explicitly_staged_node_modules_remain_committable() {
+    let f = Fixture::new();
+    let c = f.config();
+    fs::create_dir_all(f.a.join("node_modules/pkg")).unwrap();
+    fs::write(f.a.join("node_modules/pkg/file"), "intentional").unwrap();
+    git(&f.a, ["add", "node_modules/pkg/file"]);
+    let report = sync_once(&c, Trigger::Manual);
+    assert_eq!(report.outcome, Outcome::Synced, "{report:?}");
+    assert_eq!(
+        text(&f.origin, &["show", "main:node_modules/pkg/file"]),
+        "intentional"
+    );
+}
 fn reject(c: &mut Config) {
     c.hooks.pre_commit.push(HookConfig {
         command: vec![
@@ -106,6 +138,16 @@ fn rebase_conflict_retains_operation_and_local_commits_for_manual_recovery() {
     git(&f.b, ["push"]);
     let report = sync_once(&c, Trigger::Manual);
     assert_eq!(report.outcome, Outcome::ManualIntervention, "{report:?}");
+    assert!(
+        report.recovery.iter().any(|s| s.contains("shared.txt")),
+        "{report:?}"
+    );
+    assert!(
+        git_rsrs::status::next(None, &report, std::time::SystemTime::now(), 1)
+            .message
+            .unwrap()
+            .contains("shared.txt")
+    );
     assert_eq!(text(&f.a, &["rev-parse", "refs/heads/main"]), head);
     assert_eq!(
         text(&f.a, &["show", &format!("{head}:shared.txt")]),
@@ -114,6 +156,42 @@ fn rebase_conflict_retains_operation_and_local_commits_for_manual_recovery() {
     let conflict = fs::read_to_string(f.a.join("shared.txt")).unwrap();
     assert!(conflict.contains("local committed") && conflict.contains("remote committed"));
     assert!(f.a.join(".git/rebase-merge").exists());
+    assert!(f.a.join(".git/git-rsrs-integrate.json").exists());
+}
+#[test]
+fn completed_manual_rebase_clears_journal_and_pushes() {
+    let f = Fixture::new();
+    let c = f.config();
+    f.commit(&f.a, "shared.txt", "local\n");
+    f.commit(&f.b, "shared.txt", "remote\n");
+    git(&f.b, ["push"]);
+    assert_eq!(
+        sync_once(&c, Trigger::Manual).outcome,
+        Outcome::ManualIntervention
+    );
+    fs::write(f.a.join("shared.txt"), "resolved\n").unwrap();
+    git(&f.a, ["add", "shared.txt"]);
+    git(&f.a, ["-c", "core.editor=true", "rebase", "--continue"]);
+    let report = sync_once(&c, Trigger::Manual);
+    assert_eq!(report.outcome, Outcome::Synced, "{report:?}");
+    assert!(report.pushed);
+    assert!(!f.a.join(".git/git-rsrs-integrate.json").exists());
+    assert_eq!(text(&f.origin, &["show", "main:shared.txt"]), "resolved");
+}
+#[test]
+fn aborted_rebase_keeps_journal_for_inspection() {
+    let f = Fixture::new();
+    let c = f.config();
+    f.commit(&f.a, "shared.txt", "local\n");
+    f.commit(&f.b, "shared.txt", "remote\n");
+    git(&f.b, ["push"]);
+    assert_eq!(
+        sync_once(&c, Trigger::Manual).outcome,
+        Outcome::ManualIntervention
+    );
+    git(&f.a, ["rebase", "--abort"]);
+    let report = sync_once(&c, Trigger::Manual);
+    assert_eq!(report.outcome, Outcome::ManualIntervention, "{report:?}");
     assert!(f.a.join(".git/git-rsrs-integrate.json").exists());
 }
 #[test]

@@ -4,7 +4,7 @@ use crate::{
     outcome::{Outcome, SyncReport, Trigger},
     process::{CANCELLED, ProcessRunner},
     scheduler::{RunRequest, Scheduler, SchedulerEvent},
-    sync::sync_once_guarded,
+    sync::sync_once_guarded_with_lock_policy,
 };
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use std::{
@@ -101,6 +101,7 @@ fn watch_loop(config: &Config, mut emit: impl FnMut(SyncReport)) -> Result<(), W
     );
     let (report_tx, report_rx) = mpsc::channel::<SyncReport>();
     let mut worker = WorkerGuard(None);
+    let mut index_lock_since: Option<Instant> = None;
     let changes = Arc::new(AtomicU64::new(0));
     let launcher = Launcher {
         config,
@@ -134,6 +135,16 @@ fn watch_loop(config: &Config, mut emit: impl FnMut(SyncReport)) -> Result<(), W
             };
             if let Some(report) = finished {
                 let outcome = report.outcome;
+                if outcome == Outcome::LockTimeout
+                    && report
+                        .recovery
+                        .iter()
+                        .any(|path| *path == git.paths.index_lock.to_string_lossy())
+                {
+                    index_lock_since.get_or_insert_with(Instant::now);
+                } else {
+                    index_lock_since = None;
+                }
                 emit(report);
                 if outcome == Outcome::ManualIntervention {
                     eprintln!(
@@ -143,7 +154,7 @@ fn watch_loop(config: &Config, mut emit: impl FnMut(SyncReport)) -> Result<(), W
                 if let Some(request) =
                     scheduler.on_event(SchedulerEvent::RunFinished(outcome), Instant::now())
                 {
-                    launcher.start(&mut scheduler, &mut worker, request)?;
+                    launcher.start(&mut scheduler, &mut worker, request, index_lock_since)?;
                 }
             }
             if overflow.swap(false, Ordering::Relaxed) {
@@ -152,7 +163,7 @@ fn watch_loop(config: &Config, mut emit: impl FnMut(SyncReport)) -> Result<(), W
                     && let Some(request) =
                         scheduler.on_event(SchedulerEvent::LocalChange, Instant::now())
                 {
-                    launcher.start(&mut scheduler, &mut worker, request)?;
+                    launcher.start(&mut scheduler, &mut worker, request, index_lock_since)?;
                 }
             }
             match event_rx.recv_timeout(Duration::from_millis(20)) {
@@ -162,7 +173,12 @@ fn watch_loop(config: &Config, mut emit: impl FnMut(SyncReport)) -> Result<(), W
                         if let Some(request) =
                             scheduler.on_event(SchedulerEvent::LocalChange, Instant::now())
                         {
-                            launcher.start(&mut scheduler, &mut worker, request)?;
+                            launcher.start(
+                                &mut scheduler,
+                                &mut worker,
+                                request,
+                                index_lock_since,
+                            )?;
                         }
                     }
                 }
@@ -171,7 +187,7 @@ fn watch_loop(config: &Config, mut emit: impl FnMut(SyncReport)) -> Result<(), W
             }
             if let Some(request) = scheduler.on_event(SchedulerEvent::PeriodicTick, Instant::now())
             {
-                launcher.start(&mut scheduler, &mut worker, request)?;
+                launcher.start(&mut scheduler, &mut worker, request, index_lock_since)?;
             }
         }
     })();
@@ -202,11 +218,12 @@ impl Launcher<'_> {
         scheduler: &mut Scheduler,
         worker: &mut Option<JoinHandle<()>>,
         request: RunRequest,
+        index_lock_since: Option<Instant>,
     ) -> Result<(), WatchError> {
         let git = self.git;
         let commit_local = request.trigger == Trigger::LocalChange;
         // Reconcile status before a periodic/initial run: native watcher delivery can lag.
-        if !commit_local && git.is_dirty()? {
+        if !commit_local && !request.lock_retry && git.is_dirty()? {
             scheduler.defer_local(Instant::now());
             return Ok(());
         }
@@ -216,9 +233,15 @@ impl Launcher<'_> {
         let tx = self.tx.clone();
         debug_assert!(worker.is_none());
         *worker = Some(thread::spawn(move || {
-            let report = sync_once_guarded(&config, request.trigger, commit_local, || {
-                changes.load(Ordering::Relaxed) == generation
-            });
+            let persistent =
+                index_lock_since.is_some_and(|since| since.elapsed() >= Duration::from_secs(180));
+            let report = sync_once_guarded_with_lock_policy(
+                &config,
+                request.trigger,
+                commit_local,
+                || changes.load(Ordering::Relaxed) == generation,
+                persistent,
+            );
             let _ = tx.send(report);
         }));
         Ok(())
