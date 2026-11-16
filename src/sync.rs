@@ -112,6 +112,7 @@ fn reject_generated_directory(git: &Git) -> Result<(), Failure> {
         "--",
         ":(glob)**/node_modules/**",
     ])?;
+    // The pathspec only matches paths inside node_modules, so one complete record suffices.
     let Some(end) = output.stdout.iter().position(|b| *b == 0) else {
         return if output.truncated {
             Err(GitError::Invalid(
@@ -386,6 +387,11 @@ fn fetch_and_integrate(
             let paths = recovery
                 .iter()
                 .filter_map(|entry| entry.strip_prefix("conflicted path: "))
+                .map(|path| {
+                    path.strip_prefix('"')
+                        .and_then(|p| p.strip_suffix('"'))
+                        .unwrap_or(path)
+                })
                 .collect::<Vec<_>>();
             let message = if paths.is_empty() {
                 "integration requires manual intervention".into()

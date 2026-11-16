@@ -134,6 +134,7 @@ impl Git {
     {
         self.run_env_with_truncation(args, env, false)
     }
+    /// Return output up to the capture limit for callers that only need a prefix.
     pub(crate) fn run_prefix<I, S>(&self, args: I) -> Result<CommandOutput, GitError>
     where
         I: IntoIterator<Item = S>,

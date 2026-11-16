@@ -129,6 +129,7 @@ fn index_lock_acquired_during_rebase_returns_lock_timeout() {
     let report = finish_sync(child);
     assert_eq!(report.outcome, Outcome::LockTimeout, "{report:?}");
     assert!(lock.exists());
+    assert!(!f.a.join(".git/git-rsrs-integrate.json").exists());
 }
 #[test]
 fn explicitly_staged_node_modules_remain_committable() {
@@ -260,11 +261,10 @@ fn rebase_conflict_retains_operation_and_local_commits_for_manual_recovery() {
         report.recovery.iter().any(|s| s.contains("shared.txt")),
         "{report:?}"
     );
-    assert!(
-        git_rsrs::status::next(None, &report, std::time::SystemTime::now(), 1)
-            .message
-            .unwrap()
-            .contains("shared.txt")
+    let status = git_rsrs::status::next(None, &report, std::time::SystemTime::now(), 1);
+    assert_eq!(
+        status.message.as_deref(),
+        Some("integration requires manual intervention; conflicted: shared.txt")
     );
     assert_eq!(text(&f.a, &["rev-parse", "refs/heads/main"]), head);
     assert_eq!(
@@ -275,6 +275,25 @@ fn rebase_conflict_retains_operation_and_local_commits_for_manual_recovery() {
     assert!(conflict.contains("local committed") && conflict.contains("remote committed"));
     assert!(f.a.join(".git/rebase-merge").exists());
     assert!(f.a.join(".git/git-rsrs-integrate.json").exists());
+}
+#[test]
+fn conflict_status_escapes_newlines_without_quoting_paths() {
+    let f = Fixture::new();
+    f.commit(&f.a, "odd\nname", "base\n");
+    git(&f.a, ["push"]);
+    git(&f.b, ["pull"]);
+    fs::write(f.a.join("odd\nname"), "local\n").unwrap();
+    fs::write(f.b.join("odd\nname"), "remote\n").unwrap();
+    git(&f.a, ["commit", "-am", "local"]);
+    git(&f.b, ["commit", "-am", "remote"]);
+    git(&f.b, ["push"]);
+    let report = sync_once(&f.config(), Trigger::Manual);
+    assert_eq!(report.outcome, Outcome::ManualIntervention, "{report:?}");
+    let status = git_rsrs::status::next(None, &report, std::time::SystemTime::now(), 1);
+    assert_eq!(
+        status.message.as_deref(),
+        Some("integration requires manual intervention; conflicted: odd\\nname")
+    );
 }
 #[test]
 fn completed_manual_rebase_clears_journal_and_pushes() {

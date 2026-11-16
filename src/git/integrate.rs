@@ -144,6 +144,8 @@ impl Git {
         ]);
         let active = self.paths.rebase_merge.exists() || self.paths.rebase_apply.exists();
         if result.is_err() && active {
+            // Classify lock failures only after ruling out an active rebase:
+            // an active operation must retain its journal for recovery.
             // Abort can hard-reset edits made by a concurrent editor. Retain the
             // operation instead of asserting that matching refs prove preservation.
             let mut recovery = vec![format!(
